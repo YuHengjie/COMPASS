@@ -13,6 +13,7 @@ df = pd.read_excel("protein_seq_2504_unseen.xlsx", )
 df
 
 # %% Load tokenizer and model
+# Base model (ESM2): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
 model_path = "/yuhengjie/backup/pretrainedmodel/esm2_t36_3B_UR50D"
 
 # Load tokenizer and model

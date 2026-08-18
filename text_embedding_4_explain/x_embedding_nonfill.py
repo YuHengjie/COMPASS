@@ -22,6 +22,7 @@ feature_columns
 
 # %%
 # Load the model locally
+# Base model (Linq-Embed-Mistral): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
 model_path = "../../pretrained_model/Linq-Embed-Mistral"
 model = SentenceTransformer(model_path)
 

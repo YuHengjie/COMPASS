@@ -208,6 +208,7 @@ if __name__ == '__main__':
         print(f"Could not set start method: {e}")
         
     # 2. Global parameters and data loading (execute once in the main process)
+    # Base model (ESMFold): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
     model_path = "/home/yuhengjie/pt_model/esmfold_v1"
     tokenizer_path = model_path
     num_gpus = 8

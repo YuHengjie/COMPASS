@@ -20,6 +20,7 @@ df_x
 # %%
 # Load the model locally
 #model_path = "../../pt_model/Linq-Embed-Mistral"
+# Base model (Linq-Embed-Mistral): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
 model_path = "../../pretrained_model/Linq-Embed-Mistral"
 model = SentenceTransformer(model_path)
 

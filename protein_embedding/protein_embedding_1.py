@@ -13,6 +13,7 @@ df = df.iloc[0:5000,:]  # Process only the first 5000 records
 df
 
 # %% Load tokenizer and model
+# Base model (ESM2): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
 model_path = "/yuhengjie/backup/pretrainedmodel/esm2_t36_3B_UR50D"
 
 # Load tokenizer and model
