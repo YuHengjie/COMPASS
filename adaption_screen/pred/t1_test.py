@@ -1,0 +1,616 @@
+# %%
+import pickle
+import sys
+import re
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+from scipy.stats import boxcox
+from datetime import datetime 
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score,
+    confusion_matrix,
+    classification_report
+)
+import random
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import os
+from datetime import datetime
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, accuracy_score, precision_score, recall_score
+import argparse
+import json
+# 设定设备
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 设置随机数种子
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)                     
+    torch.cuda.manual_seed(seed)                
+
+set_seed(42)
+
+# %%
+# ================================
+# Step 2: 构建 Dataset
+# ================================
+class EmbeddingPairDataset(Dataset):
+    def __init__(self, df,  text_embed_data, pro_esm_dict, pro_esmfold_dict):
+        self.df = df.reset_index(drop=True)
+        self.text_embed_data = text_embed_data
+        self.pro_esm_dict = pro_esm_dict
+        self.pro_esmfold_dict = pro_esmfold_dict
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        
+        text_embed = self.text_embed_data[int(row["x_index"])]
+        
+        # Fetch the protein embedding
+        pro_esm_embed = self.pro_esm_dict[row["Accession"]]
+        pro_esmfold_embed = self.pro_esmfold_dict[row["Accession"]]
+        
+        # Affinity category
+        rpa = row["Protein corona composition"]
+        
+        return torch.tensor(text_embed, dtype=torch.float32), \
+               torch.tensor(pro_esm_embed, dtype=torch.float32), \
+               torch.tensor(pro_esmfold_embed, dtype=torch.float32), \
+               torch.tensor(rpa, dtype=torch.float32)
+
+# %%
+class CrossAttentionClassifierGated(nn.Module):
+    def __init__(self, 
+                 x_dim,              # 文本 / 纳米材料特征维度
+                 pro_seq_dim,        # 蛋白序列特征维度（如 ESM2: 2560）
+                 pro_str_dim,        # 蛋白结构特征维度（如 ESMFold: 384）
+                 hidden_dim=1024, 
+                 dropout=0.3):
+        super().__init__()
+
+        # --------- 文本侧：保持不变 ---------
+        self.x_mlp = nn.Sequential(
+            nn.Linear(x_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+        # --------- 蛋白侧：seq/struct 各自投影到 hidden_dim，再融合 ---------
+
+        # 序列 & 结构各自投影到 hidden_dim（和 x_mlp 对齐）
+        self.proj_seq = nn.Sequential(
+            nn.Linear(pro_seq_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        self.proj_str = nn.Sequential(
+            nn.Linear(pro_str_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+        # 维度级残差门控：输入 concat([seq_h, str_h]) ∈ R^{B×2H}
+        # 输出 gate g ∈ (0,1)^{B×H}
+        self.pro_gate = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid()
+        )
+
+        # 融合后的蛋白向量，再过一层 BN + ReLU + Dropout
+        # 注意：这里没有 Linear，保持“只有一层映射到 hidden_dim”的设定
+        self.pro_mlp  = nn.Sequential(
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # --------- 注意力：保持不变 ---------
+        self.attn  = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=8,
+            batch_first=True,
+            dropout=dropout/2
+        )
+        
+        # --------- 分类头：保持不变 ---------
+        self.classifier  = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim//4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim//4, hidden_dim//16),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim//16, 1)  # 二分类 logits（配合 BCEWithLogitsLoss）
+        )
+ 
+        # 初始化参数 
+        self._init_weights()
+ 
+    def _init_weights(self):
+        # 原本的 x_mlp / pro_mlp / classifier 里的 Linear
+        for module in [self.x_mlp, self.classifier]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
+                    nn.init.constant_(layer.bias, 0.1)
+
+        # 新增的 proj_seq / proj_str / pro_gate 里的 Linear
+        for m in [self.proj_seq, self.proj_str] + \
+                 [l for l in self.pro_gate if isinstance(l, nn.Linear)]:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                nn.init.constant_(m.bias, 0.0)
+
+        # 可选：把门控最后一层 bias 初始化为略偏向“序列”
+        last_linear = [l for l in self.pro_gate if isinstance(l, nn.Linear)][-1]
+        nn.init.constant_(last_linear.bias, -1.0)  # sigmoid(-1)≈0.27，初始更偏 seq
+
+    def forward(self, x_embed, pro_seq_embed, pro_str_embed):
+        """
+        x_embed       : [B, x_dim]
+        pro_seq_embed : [B, pro_seq_dim]  (ESM2 输出等)
+        pro_str_embed : [B, pro_str_dim]  (ESMFold 或结构特征)
+        """
+
+        # --------- 文本侧：保持不变 ---------
+        x_feat = self.x_mlp(x_embed)        # [B, hidden_dim]
+
+        # --------- 蛋白序列+结构的融合 ---------
+        # 1) 各自投影到 hidden_dim
+        seq_h = self.proj_seq(pro_seq_embed)   # [B, hidden_dim]
+        str_h = self.proj_str(pro_str_embed)   # [B, hidden_dim]
+
+        # 2) 维度级残差门控
+        #    g ∈ (0,1)^{B×hidden_dim}，每个维度一个 gate
+        g = self.pro_gate(torch.cat([seq_h, str_h], dim=-1))      # [B, hidden_dim]
+
+        # 3) 残差形式：从 seq_h 出发，用结构做纠偏
+        #    g ≈ 0 → 接近 seq_h； g ≈ 1 → 接近 str_h
+        pro_fused = seq_h + g * (str_h - seq_h)                   # [B, hidden_dim]
+
+        # 4) 再过 BN + ReLU + Dropout（和 x_mlp 风格一致）
+        pro_feat = self.pro_mlp(pro_fused)                        # [B, hidden_dim]
+        
+        # --------- 交叉注意力：保持不变 ---------
+        x_tok   = x_feat.unsqueeze(1)   # [B, 1, hidden_dim]
+        pro_tok = pro_feat.unsqueeze(1) # [B, 1, hidden_dim]
+        
+        attn_out, _ = self.attn(
+            query=x_tok,
+            key=pro_tok,
+            value=pro_tok,
+            need_weights=False
+        )
+        
+        fused_feature = x_tok + attn_out          # [B, 1, hidden_dim]
+        fused_feature = fused_feature.squeeze(1)  # [B, hidden_dim]
+        
+        # --------- 分类输出：保持不变 ---------
+        logits = self.classifier(fused_feature).squeeze(-1)   # [B]
+
+        # 返回 logits + gate，方便后面分析 gate 的使用情况
+        return logits, g
+
+# %%
+def print_model_params_count(model):
+    # 遍历模型的每一个子模块
+    for name, module in model.named_modules():
+        num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+        if num_params > 0:  # 只打印有参数的模块
+            print(f"Layer: {name}, Number of parameters: {num_params}")
+
+# %%
+# -------------------------
+# 4) 评估工具
+# -------------------------
+@torch.no_grad()
+def _eval_cls(logits_all, y_all, sample_weight=None, thresh=0.5):
+    probs = torch.sigmoid(torch.tensor(logits_all)).numpy()
+    y_true = torch.tensor(y_all).numpy().astype(int)
+    sw = None if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
+
+    # 可能出现单类，做 NaN 保护
+    if len(np.unique(y_true)) > 1:
+        auroc = roc_auc_score(y_true, probs, sample_weight=sw)
+        aupr = average_precision_score(y_true, probs, sample_weight=sw)
+    else:
+        auroc, aupr = np.nan, np.nan
+
+    y_pred = (probs >= thresh).astype(int)
+    f1 = f1_score(y_true, y_pred, sample_weight=sw, zero_division=0,)
+    acc = accuracy_score(y_true, y_pred, sample_weight=sw)
+    
+    precision = precision_score(y_true, y_pred, sample_weight=sw, zero_division=0)
+    recall = recall_score(y_true, y_pred, sample_weight=sw, zero_division=0)
+    
+    return auroc, aupr, f1, precision, recall, acc, probs
+
+def find_best_threshold(probs, y_true, sample_weight=None):
+    grid = np.linspace(0.05, 0.95, 19)
+    y_true = np.asarray(y_true).astype(int)
+    sw = None if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
+
+    best_t, best_f1 = 0.5, -1
+    for t in grid:
+        f1 = f1_score(y_true, (probs >= t).astype(int), sample_weight=sw, zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_t = f1, t
+    return best_t, best_f1
+
+@torch.no_grad()
+def evaluate_on_loader(model, loader, threshold=0.5, auto_find=True, sample_weighted=True):
+    model.eval()
+    logits_all, y_all, w_all = [], [], []
+    for text, pro_seq, pro_str, y, w in loader:
+        text = text.to(device, non_blocking=True)
+        pro_seq = pro_seq.to(device, non_blocking=True)
+        pro_str = pro_str.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        w = w.to(device, non_blocking=True)
+
+        logits, _ = model(text, pro_seq, pro_str)
+        logits_all.append(logits.detach().cpu())
+        y_all.append(y.detach().cpu())
+        w_all.append(w.detach().cpu())
+
+    logits_all = torch.cat(logits_all).numpy()
+    y_all = torch.cat(y_all).numpy().astype(int)
+    w_all = torch.cat(w_all).numpy().astype(float)
+
+    sw = w_all if sample_weighted else None
+
+    # 固定阈值 0.5
+    auroc_05, aupr_05, f1_05, precision_05, recall_05, acc_05, probs = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.5)
+    # 新增：固定阈值 0.25
+    auroc_025, aupr_025, f1_025, precision_025, recall_025, acc_025, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.25)
+
+    base_dict = {
+        "probs": probs,
+        "y_true": y_all,
+        "weights": w_all,
+        "metrics@0.5":  {"AUROC": auroc_05,  "AUPRC": aupr_05,  "F1": f1_05, "Precision": precision_05, "Recall": recall_05,  "ACC": acc_05,  "thr": 0.5},
+        "metrics@0.25": {"AUROC": auroc_025, "AUPRC": aupr_025, "F1": f1_025, "Precision": precision_025, "Recall": recall_025, "ACC": acc_025, "thr": 0.25},
+    }
+
+    if auto_find:
+        best_thr, best_f1 = find_best_threshold(probs, y_all, sample_weight=sw)
+        auroc_b, aupr_b, f1_b, precision_b, recall_b, acc_b, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=best_thr)
+        base_dict["metrics@best_on_test"] = {
+            "AUROC": auroc_b, "AUPRC": aupr_b, "F1": f1_b, "Precision": precision_b, "Recall": recall_b, "ACC": acc_b, "thr": best_thr
+        }
+
+    # 使用给定阈值
+    auroc_t, aupr_t, f1_t, precision_t, recall_t, acc_t, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=threshold)
+    base_dict["metrics@thr"] = {"AUROC": auroc_t, "AUPRC": aupr_t, "F1": f1_t, "Precision": precision_t, "Recall": recall_t, "ACC": acc_t, "thr": threshold}
+    return base_dict
+
+def load_threshold_from_history(history_path, load_stage: int):
+    """
+    从训练保存的 history_*.npy 中，根据 load_stage 选择评估指标与阈值字段，
+    找到该指标最优 epoch 对应的阈值，并返回 (thr, best_idx, best_metric)。
+
+    规则：
+      - load_stage ∈ {1, 5}: 指标='aupr', 阈值='best_thresh'
+      - load_stage ∈ {2, 3, 4}: 指标='avg_aupr', 阈值='val_out_best_t'
+    """
+    if not os.path.exists(history_path):
+        raise FileNotFoundError(f"History file not found: {history_path}")
+
+    hist = np.load(history_path, allow_pickle=True).item()
+    if not isinstance(hist, dict):
+        raise ValueError(f"History file is not a dict-like object: {history_path}")
+
+    # 根据阶段选择字段
+    if load_stage in (1, 5):
+        metric_key = "aupr"
+        thr_key = "best_thresh"
+    elif load_stage in (2, 3, 4):
+        metric_key = "avg_aupr"
+        thr_key = "val_out_best_t"
+    else:
+        raise ValueError(f"Unsupported load_stage={load_stage}. Expected one of {{1,2,3,4,5}}.")
+
+    # 读取指标与阈值列表
+    metrics = np.array(hist.get(metric_key, []), dtype=float)
+    thr_list = np.array(hist.get(thr_key, []), dtype=float)
+
+    # 健壮性检查
+    if metrics.size == 0:
+        raise ValueError(f"'{metric_key}' is empty or missing in {history_path}. keys={list(hist.keys())}")
+    if thr_list.size == 0:
+        raise ValueError(f"'{thr_key}' is empty or missing in {history_path}. keys={list(hist.keys())}")
+    if len(metrics) != len(thr_list):
+        raise ValueError(
+            f"Length mismatch in {history_path}: len({metric_key})={len(metrics)} vs len({thr_key})={len(thr_list)}"
+        )
+    if np.all(np.isnan(metrics)):
+        raise ValueError(f"All values in '{metric_key}' are NaN in {history_path}.")
+
+    # 取最优指标对应的索引
+    metrics_safe = np.where(np.isnan(metrics), -np.inf, metrics)
+    best_idx = int(np.argmax(metrics_safe))
+
+    thr = float(thr_list[best_idx])
+    best_metric = float(metrics[best_idx])
+    return thr, best_idx, best_metric
+
+# =============== 安全 JSON 转换 ===============
+def _to_py(obj):
+    """把 numpy / torch 类型安全转成原生 Python 类型，便于 json.dump。"""
+    try:
+        if isinstance(obj, torch.Tensor):
+            obj = obj.detach().cpu().numpy()
+    except Exception:
+        pass
+
+    if isinstance(obj, dict):
+        return {k: _to_py(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_py(x) for x in obj]
+    if isinstance(obj, (np.generic,)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+@torch.no_grad()
+def predict_on_loader(model, loader, device, threshold=0.5):
+    """
+    返回：
+        probs: 预测为正类的概率
+        preds: 根据 threshold 得到的 0/1 标签
+    """
+    model.eval()
+
+    all_probs = []
+
+    for batch in loader:
+        if len(batch) == 4:
+            text_x, pro_esm_x, pro_esmfold_x, _ = batch
+        elif len(batch) == 3:
+            text_x, pro_esm_x, pro_esmfold_x = batch
+        else:
+            raise ValueError(f"Unexpected batch format, got length={len(batch)}")
+
+        text_x = text_x.to(device, non_blocking=True)
+        pro_esm_x = pro_esm_x.to(device, non_blocking=True)
+        pro_esmfold_x = pro_esmfold_x.to(device, non_blocking=True)
+
+        # 注意：模型返回 logits 和 gate
+        logits, _ = model(text_x, pro_esm_x, pro_esmfold_x)
+
+        logits = logits.view(-1)
+
+        probs = torch.sigmoid(logits)
+        all_probs.append(probs.cpu().numpy())
+
+    probs = np.concatenate(all_probs, axis=0)
+    preds = (probs >= threshold).astype(int)
+
+    return probs, preds
+
+
+# %%
+# ======================
+# 0. 手动配置参数
+# ======================
+ckpt_path = "../../train_basic_10/output/stage_12345/saved_model_stage_5.pt"
+
+input_csv = "../ft/data/test.csv"
+
+pro_esm_path = "../data/protein_embeddings.pkl"
+pro_esmfold_path = "../data/esmfold_protein_embeddings.pkl"
+text_embedding_path = "../data/text_embeddings.npy"
+
+output_csv = "infer_test.csv"
+
+batch_size = 4096
+num_workers = 8
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# %%
+work_dir = "../../train_basic_10/output/stage_12345"
+load_stage = 5
+history_path = os.path.join(work_dir, f"history_stage_{load_stage}.npy")
+thr_history, best_idx, best_metric = load_threshold_from_history(history_path, load_stage)
+threshold = thr_history
+print(f"Loaded threshold from history (stage {load_stage}): {threshold:.4f} at epoch {best_idx}, best_metric={best_metric:.4f}")
+
+# %%
+# ======================
+# 2. 加载 embedding
+# ======================
+
+print("Loading embeddings...")
+
+with open(pro_esm_path, "rb") as f:
+    pro_esm_dict = pickle.load(f)
+
+first_key = next(iter(pro_esm_dict))
+print(f"Array shape pro_esm_dict[{first_key}]: {pro_esm_dict[first_key].shape}")
+
+with open(pro_esmfold_path, "rb") as f:
+    pro_esmfold_dict = pickle.load(f)
+
+first_key = next(iter(pro_esmfold_dict))
+print(f"Array shape pro_esmfold_dict[{first_key}]: {pro_esmfold_dict[first_key].shape}")
+
+text_embed_data = np.load(text_embedding_path)
+print(f"Text embedding shape: {text_embed_data.shape}")
+
+x_dim = text_embed_data.shape[1]
+pro_esm_dim = next(iter(pro_esm_dict.values())).shape[0]
+pro_esmfold_dim = next(iter(pro_esmfold_dict.values())).shape[0]
+
+print("x_dim:", x_dim)
+print("pro_esm_dim:", pro_esm_dim)
+print("pro_esmfold_dim:", pro_esmfold_dim)
+
+# %%
+# ======================
+# 3. 加载输入数据
+# ======================
+
+print("Loading input CSV...")
+
+input_df = pd.read_csv(
+    input_csv,
+    keep_default_na=False,
+    na_values=[""]
+)
+
+print("Input shape:", input_df.shape)
+input_df
+
+# %%
+# 3. 加载输入数据
+# ======================
+
+infer_dataset = EmbeddingPairDataset(
+    input_df,
+    text_embed_data,
+    pro_esm_dict,
+    pro_esmfold_dict
+)
+
+infer_loader = DataLoader(
+    infer_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=num_workers
+)
+
+# %%
+# 4. 加载模型
+# ======================
+
+print("Loading model...")
+
+model = CrossAttentionClassifierGated(
+    x_dim,
+    pro_esm_dim,
+    pro_esmfold_dim
+).to(device)
+
+state_dict = torch.load(ckpt_path, map_location=device)
+model.load_state_dict(state_dict)
+
+print(f"Loaded checkpoint: {ckpt_path}")
+
+# %%
+# 5. 推理
+# ======================
+
+print("Running inference...")
+
+probs, preds = predict_on_loader(
+    model=model,
+    loader=infer_loader,
+    device=device,
+    threshold=threshold
+)
+
+print("Inference done.")
+print("probs shape:", probs.shape)
+print("preds shape:", preds.shape)
+
+
+# %%
+# 6. 保存结果
+# ======================
+result_df = input_df.copy()
+result_df["pred_prob"] = probs
+result_df["pred_label"] = preds
+
+result_df.to_csv(output_csv, index=False, encoding="utf-8")
+
+print(f"Saved inference results to: {output_csv}")
+
+result_df
+
+# %%
+y_true = input_df["Protein corona composition"].astype(int).values
+
+acc = accuracy_score(y_true, preds)
+precision = precision_score(y_true, preds, zero_division=0)
+recall = recall_score(y_true, preds, zero_division=0)
+f1 = f1_score(y_true, preds, zero_division=0)
+
+auroc = roc_auc_score(y_true, probs)
+auprc = average_precision_score(y_true, probs)
+
+cm = confusion_matrix(y_true, preds)
+
+
+mean_five = (acc + precision + recall + auroc + auprc)/5
+
+print("===== Evaluation Metrics =====")
+print(f"Threshold : {threshold}")
+print(f"Accuracy  : {acc:.4f}")
+print(f"Precision : {precision:.4f}")
+print(f"Recall    : {recall:.4f}")
+print(f"F1-score  : {f1:.4f}")
+print(f"AUROC     : {auroc:.4f}")
+print(f"AUPRC     : {auprc:.4f}")
+print(f"Mean(five): {mean_five:.4f}")
+
+print("\nConfusion Matrix:")
+print(cm)
+
+print("\nClassification Report:")
+print(classification_report(y_true, preds, digits=4, zero_division=0))
+
+# %%
+output_txt = "t1_infer_raw_candidate.txt"
+
+with open(output_txt, "w", encoding="utf-8") as f:
+    f.write("===== Evaluation Metrics =====\n")
+    f.write(f"Threshold : {threshold}\n")
+    f.write(f"Accuracy  : {acc:.4f}\n")
+    f.write(f"Precision : {precision:.4f}\n")
+    f.write(f"Recall    : {recall:.4f}\n")
+    f.write(f"F1-score  : {f1:.4f}\n")
+    f.write(f"AUROC     : {auroc:.4f}\n")
+    f.write(f"AUPRC     : {auprc:.4f}\n")
+    f.write(f"Mean(five): {mean_five:.4f}\n")
+
+    f.write("\nConfusion Matrix:\n")
+    f.write(str(cm))
+    f.write("\n")
+
+    f.write("\nClassification Report:\n")
+    f.write(classification_report(
+        y_true,
+        preds,
+        digits=4,
+        zero_division=0
+    ))
+
+print(f"Evaluation metrics saved to: {output_txt}")
+
+# %%
