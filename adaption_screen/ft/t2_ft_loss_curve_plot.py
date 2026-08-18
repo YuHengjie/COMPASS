@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
 
-# 字体
+# Font
 font_path = "/home/yuhengjie/.fonts/ArialMdm.ttf"
 prop = fm.FontProperties(fname=font_path)
 
@@ -13,7 +13,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 # %%
 # =========================
-# 读取 history
+# Read history
 # =========================
 
 history = np.load(
@@ -33,7 +33,7 @@ epochs = np.arange(1, len(train_loss)+1)
 
 # %%
 # =========================
-# 绘图
+# Plot
 # =========================
 
 fig, ax = plt.subplots(
@@ -59,7 +59,7 @@ ax.plot(
 
 
 # =========================
-# 坐标轴
+# Axes
 # =========================
 
 ax.set_xlabel(
@@ -77,7 +77,7 @@ ax.set_ylabel(
 
 
 
-# tick字体
+# tick font
 
 for label in ax.get_xticklabels():
     label.set_fontproperties(prop)
@@ -88,7 +88,7 @@ for label in ax.get_yticklabels():
 
 
 # =========================
-# 美化
+# Styling
 # =========================
 
 ax.spines['top'].set_visible(False)

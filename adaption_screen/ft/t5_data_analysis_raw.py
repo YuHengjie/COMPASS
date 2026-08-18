@@ -12,7 +12,7 @@ df_raw = pd.read_csv("../data/dataset_qc.csv")
 df_raw
 
 # %%
-# 如果 df_pred 中有重复的 ID-dose 组合，为了防止 df_raw 数量膨胀，建议先对 df_pred 去重：
+# If df_pred has duplicate ID-dose combinations, deduplicate df_pred first to avoid inflating df_raw:
 df_filtered = pd.merge(
     df_raw, 
     df_pred[['ID', 'dose']].drop_duplicates(), 
@@ -22,18 +22,18 @@ df_filtered = pd.merge(
 df_filtered
 
 # %%
-# RPA 宽表
+# RPA wide table
 rpa_wide = (
     df_filtered.pivot_table(
         index=["ID", "dose"],
         columns="Accession",
         values="RPA",
-        aggfunc="mean"   # 如果同一 ID/dose/Accession 有重复，取第一个
+        aggfunc="mean"   # If the same ID/dose/Accession has duplicates, keep the first
     )
     .reset_index()
 )
 
-# pred_prob 宽表
+# pred_prob wide table
 pred_prob_wide = (
     df_pred.pivot_table(
         index=["ID", "dose"],
@@ -44,7 +44,7 @@ pred_prob_wide = (
     .reset_index()
 )
 
-# 去掉 columns 的名字，使表头更干净
+# Remove column names to clean the header
 rpa_wide.columns.name = None
 pred_prob_wide.columns.name = None
 
@@ -75,7 +75,7 @@ rpa_wide_T = rpa_wide_T.rename(columns={"index": "Accession"})
 rpa_wide_T
 
 # %%
-# 去掉 columns 的名字，使表头更干净
+# Remove column names to clean the header
 rpa_wide_T.columns.name = None
 rpa_wide_T
 
@@ -97,7 +97,7 @@ pred_prob_wide_T = pred_prob_wide_T.rename(columns={"index": "Accession"})
 pred_prob_wide_T
 
 # %%
-# 去掉 columns 的名字，使表头更干净
+# Remove column names to clean the header
 pred_prob_wide_T.columns.name = None
 pred_prob_wide_T
 
@@ -125,20 +125,20 @@ def protein_abundance_metrics_from_column(df, col, threshold=0):
 
     x = df[col].astype(float).to_numpy()
 
-    # 总蛋白数
+    # Total number of proteins
     N = len(x)
 
-    # 检测到的蛋白，默认 x > 0
+    # Detected proteins, default x > 0
     detected = x > threshold
     x_detected = x[detected]
 
-    # 非零或超过阈值的蛋白数量
+    # Number of nonzero proteins or proteins above threshold
     S = len(x_detected)
 
-    # 覆盖度
+    # Coverage
     coverage = S / N if N > 0 else np.nan
 
-    # 如果没有检测到蛋白
+    # If no protein is detected
     if S == 0:
         return {
             "total_proteins": N,
@@ -152,7 +152,7 @@ def protein_abundance_metrics_from_column(df, col, threshold=0):
             "gini_nonzero": np.nan
         }
 
-    # 归一化成概率
+    # Normalize to probabilities
     p = x_detected / x_detected.sum()
 
     # Shannon entropy
@@ -204,22 +204,22 @@ np_cols = rpa_wide_T.columns.difference(["Accession"])
 print("RPA 列名：", np_cols.tolist())
 
 # %%
-# 对每个 RPA 列分别计算蛋白丰度指标，并整理成新的 DataFrame
+# Compute protein abundance metrics for each RPA column and arrange them into a new DataFrame
 
 metrics_list = []
 
 for col in np_cols:
     metrics = protein_abundance_metrics_from_column(rpa_wide_T, col, threshold=1e-6)
     
-    # 加入当前样本/列名
+    # Add the current sample/column name
     metrics["sample"] = col
     
     metrics_list.append(metrics)
 
-# 转成 DataFrame
+# Convert to DataFrame
 df_rpa_metrics = pd.DataFrame(metrics_list)
 
-# 把 sample 列放到最前面
+# Move the sample column to the front
 df_rpa_metrics = df_rpa_metrics[
     ["sample"] + [c for c in df_rpa_metrics.columns if c != "sample"]
 ]
@@ -230,7 +230,7 @@ df_rpa_metrics
 df_rpa_metrics.describe()
 
 # %%
-# 按 coverage 从大到小排序并保存
+# Sort by coverage in descending order and save
 df_rpa_metrics_coverage_sorted = df_rpa_metrics.sort_values(
     by="coverage",
     ascending=False

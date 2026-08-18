@@ -6,14 +6,14 @@ import pandas as pd
 import numpy as np
 from transformers import AutoTokenizer, EsmForProteinFolding
 import multiprocessing as mp
-import pickle # 导入 pickle 库
-import os # 导入 os 库，用于检查文件是否存在
+import pickle # Import pickle
+import os # Import os for checking file existence
 
 # %%
-# 使用 GPU（如果可用）
+# Use GPU when available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ==============================
-# 测试显存占用
+# Test GPU memory usage
 # ==============================
 def test_gpu_memory():
     for i in range(torch.cuda.device_count()):
@@ -26,9 +26,9 @@ def test_gpu_memory():
 
 # %%
 # ==============================
-# 分段函数（带 overlap）
+# Piecewise function with overlap
 # ==============================
-max_len = 1024   # 每段最大长度
+max_len = 1024   # Maximum length per segment
 overlap = 64
 
 def chunk_sequence(seq, chunk_size=max_len, overlap=overlap):
@@ -41,7 +41,7 @@ def chunk_sequence(seq, chunk_size=max_len, overlap=overlap):
     return chunks
 
 # %%
-# 定义全局保存路径
+# Define the global save path
 EMBEDDING_FILE = "esmfold_protein_embeddings_unseen.pkl"
 
 def clean_sequence(seq):
@@ -52,8 +52,8 @@ def clean_sequence(seq):
 
 def compute_protein_embedding_single_gpu(seq, model, tokenizer, chunk_size, overlap, device):
     """单序列切片处理函数 (与你原代码的 compute_protein_embedding 相似)"""
-    # ... (使用你原代码中的 compute_protein_embedding 逻辑，确保它只接受单个 seq)
-    # 此处省略具体实现，沿用你原始代码中单序列的处理逻辑，无需 batching
+    # ... (reuse the single-sequence handling logic from the original compute_protein_embedding)
+    # The single-sequence handling logic from the original code is reused here; no batching is needed
     seq = clean_sequence(seq)
     chunks = chunk_sequence(seq, chunk_size, overlap)
     all_embeddings = []
@@ -62,14 +62,14 @@ def compute_protein_embedding_single_gpu(seq, model, tokenizer, chunk_size, over
         for chunk in chunks:
             tokenized_input = tokenizer([chunk], return_tensors="pt", 
                                         add_special_tokens=False,padding=True,)["input_ids"].to(device)
-            # 直接调用模型，因为没有 DataParallel
+            # Call the model directly because there is no DataParallel
             output = model(tokenized_input) 
-            # 确保 output["states"] 的 shape 是 [1, L, 384] 或类似
+            # Ensure output["states"] has shape [1, L, 384] or similar
             last_layer = output["states"][-1, 0] 
             chunk_emb = last_layer.mean(dim=0)
             all_embeddings.append(chunk_emb.cpu().to(torch.float32))
             
-            # 清理显存
+            # Clear GPU memory
             del tokenized_input, output, last_layer
             torch.cuda.empty_cache()
 
@@ -82,7 +82,7 @@ def gpu_worker(rank, df_subset, model_path, tokenizer_path, chunk_size, overlap,
     device = torch.device(f"cuda:{rank}")
     print(f"Worker {rank}: Loading model on {device}")
     
-    # 加载模型和 tokenizer 到各自的 GPU
+    # Load model and tokenizer onto their GPUs
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = EsmForProteinFolding.from_pretrained(
         model_path,
@@ -90,34 +90,34 @@ def gpu_worker(rank, df_subset, model_path, tokenizer_path, chunk_size, overlap,
         low_cpu_mem_usage=True,
     ).to(device).eval()
     
-    # 推理
-    for _, row in tqdm(df_subset.iterrows(), total=len(df_subset), desc=f"GPU {rank} Progress"): # 增加子进程 tqdm
+    # Inference
+    for _, row in tqdm(df_subset.iterrows(), total=len(df_subset), desc=f"GPU {rank} Progress"): # Add tqdm for subprocesses
         accession = row["Accession"]
         seq = row["Sequence"]
         
         try:
-            # 调用单序列处理函数
+            # Call the single-sequence processing function
             emb = compute_protein_embedding_single_gpu(seq, model, tokenizer, chunk_size, overlap, device)
             result_queue.put((accession, emb))
         except Exception as e:
             print(f"Error processing {accession} on GPU {rank}: {e}")
-            # 如果出错，仍然发送 None，主进程会忽略，但我们在这里仍然要继续
+            # If an error occurs, still send None; the main process ignores it, but execution continues here
             result_queue.put((accession, None)) 
             
-    # **🌟 关键修改：发送结束信号 🌟**
+    # Key change: send the end signal
     result_queue.put(('SENTINEL', None)) 
             
-    # 显式清理
+    # Explicit cleanup
     del model, tokenizer
     torch.cuda.empty_cache()
     print(f"Worker {rank}: Finished.")
     
 # ==============================
-# 主进程：协调与保存
+# Main process: coordinate and save
 # ==============================
 def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, num_gpus):
 
-    # Step A: 加载已有结果
+    # Step A: Load existing results
     embedding_dict = {}
     if os.path.exists(EMBEDDING_FILE):
         try:
@@ -137,12 +137,12 @@ def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, 
 
     print(f"Total sequences to process: {len(df_unprocessed)}")
 
-    # Step B: 切分数据
+    # Step B: Split data
     num_gpus = min(num_gpus, len(df_unprocessed))
     df_splits = np.array_split(df_unprocessed, num_gpus)
     result_queue = mp.Queue()
 
-    # Step C: 启动子进程
+    # Step C: Start subprocesses
     processes = []
     for rank in range(num_gpus):
         p = mp.Process(
@@ -152,7 +152,7 @@ def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, 
         p.start()
         processes.append(p)
 
-    # Step D: 主进程收集结果并保存
+    # Step D: Main process collects results and saves them
     active_processes = num_gpus
     SAVE_INTERVAL = max(100, num_gpus)
     pbar = tqdm(total=len(df_unprocessed), desc="Overall Progress")
@@ -169,7 +169,7 @@ def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, 
                 embedding_dict[accession] = emb
                 pbar.update(1)
 
-                # 定期保存（原子写）
+                # Periodic save (atomic write)
                 if len(embedding_dict) % SAVE_INTERVAL == 0:
                     tmp_file = EMBEDDING_FILE + ".tmp"
                     with open(tmp_file, "wb") as f:
@@ -178,12 +178,12 @@ def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, 
                     pbar.set_postfix({"Saved": len(embedding_dict)})
 
         except Exception:
-            pass  # 队列暂时为空
+            pass  # Queue is currently empty
 
     for p in processes:
         p.join()
 
-    # Step E: 最终保存
+    # Step E: Final save
     tmp_file = EMBEDDING_FILE + ".tmp"
     with open(tmp_file, "wb") as f:
         pickle.dump(embedding_dict, f)
@@ -196,29 +196,29 @@ def run_parallel_inference(df, model_path, tokenizer_path, chunk_size, overlap, 
 
 # %%
 # =========================================================
-# 主执行入口
+# Main entry point
 # =========================================================
 if __name__ == '__main__':
-    # 1. 设置启动方法 (放在这里，防止重复设置)
+    # 1. Set the multiprocessing start method here to avoid duplicate setup
     try:
-        # force=True 确保设置生效
+        # force=True ensures the setting takes effect
         mp.set_start_method('spawn', force=True) 
         print("Multiprocessing start method set to 'spawn'.")
     except RuntimeError as e:
         print(f"Could not set start method: {e}")
         
-    # 2. 全局参数和数据加载 (仅在主进程中执行一次)
+    # 2. Global parameters and data loading (execute once in the main process)
     model_path = "/home/yuhengjie/pt_model/esmfold_v1"
     tokenizer_path = model_path
     num_gpus = 8
     max_len = 1024
     overlap = 64
     
-    # 假设 df 已加载
-    # ⚠️ 确保 pd.read_excel 也在 if __name__ == '__main__': 块内
+    # Assume df is already loaded
+    # Ensure pd.read_excel is also inside the if __name__ == '__main__': block
     df = pd.read_excel("protein_seq_2504_unseen.xlsx", )
 
-    # 3. 运行并行推理 (仅在主进程中执行一次)
+    # 3. Run parallel inference (execute once in the main process)
     print(f"Starting parallel inference on {num_gpus} GPUs...")
     embedding_dict = run_parallel_inference(df, model_path, tokenizer_path, max_len, overlap, num_gpus)
 

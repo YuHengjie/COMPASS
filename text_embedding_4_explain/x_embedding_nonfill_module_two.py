@@ -25,7 +25,7 @@ model_path = "../../pretrained_model/Linq-Embed-Mistral"
 model = SentenceTransformer(model_path)
 
 # %%
-# 读取 JSON 文件
+# Read JSON file
 with open('../model_explain/feature_config.json', 'r', encoding='utf-8') as f:
     config = json.load(f)
 config
@@ -142,19 +142,19 @@ When nanomaterials (NMs) enter biological systems, they interact with biomolecul
 texts_with_instruct = [get_detailed_instruct(task, t, context) for t in texts]
 print(texts_with_instruct[0])
 
-# %% 生成 group pair
+# %% Generate group pairs
 group_names = list(config.keys())
 group_pairs = list(itertools.combinations(group_names, 2))
 group_pairs[:5], len(group_pairs)
 
-# %% 检测保存文件个数，意外中断后重新开始
+# %% Detect the number of saved files and resume after an unexpected interruption
 folder_path = "./nonfill_module_two"
 os.makedirs(folder_path, exist_ok=True)
 existing_files = {f for f in os.listdir(folder_path) if f.endswith(".npy")}
 print("existing:", len(existing_files))
 
 def clean_name(name: str) -> str:
-    # 文件名安全：字母数字保留，其余变 _
+    # Filename safety: keep alphanumeric characters, convert the rest to _
     return ''.join(c if (c.isalpha() or c.isdigit()) else '_' for c in name)
 
 # %%
@@ -168,21 +168,21 @@ for g1, g2 in group_pairs:
     file_path = os.path.join(folder_path, file_name)
     file_path_r = os.path.join(folder_path, file_name_r)
 
-    # 1️⃣ 正向存在，跳过
+    # Forward case exists, skip
     if file_name in existing_files:
         print(f"Skipping {g1} & {g2} (forward exists) ----------")
         continue
 
-    # 2️⃣ 反向存在：读取并另存为正向（复用结果）
+    # Reverse case exists: read and save as the forward case (reuse results)
     if file_name_r in existing_files:
         print(f"Found reverse file for {g1} & {g2}, copying ----------")
         embeddings = np.load(file_path_r)
         np.save(file_path, embeddings)
-        # 关键：更新 existing_files，避免同一次运行重复算
+        # Key: update existing_files to avoid duplicate computation in one run
         existing_files.add(file_name)
         continue
 
-    # 3️⃣ 两者都不存在：正常计算
+    # Neither case exists: compute normally
     feats1 = config[g1]
     feats2 = config[g2]
 
@@ -190,7 +190,7 @@ for g1, g2 in group_pairs:
 
     df_ablation = df_x.copy()
 
-    # 只对 df 里真实存在的列做 Unknown（避免 config 列名和 df 不一致报错）
+    # Set Unknown only for columns that exist in df (avoid config/df column mismatches)
     cols_to_unknown = [c for c in set(feats1 + feats2) if c in df_ablation.columns]
     df_ablation[cols_to_unknown] = "Unknown"
 

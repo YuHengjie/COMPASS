@@ -25,7 +25,7 @@ model_path = "../../pretrained_model/Linq-Embed-Mistral"
 model = SentenceTransformer(model_path)
 
 # %%
-# 读取 JSON 文件
+# Read JSON file
 with open('../model_explain/feature_config.json', 'r', encoding='utf-8') as f:
     config = json.load(f)
 config
@@ -142,7 +142,7 @@ When nanomaterials (NMs) enter biological systems, they interact with biomolecul
 texts_with_instruct = [get_detailed_instruct(task, t, context) for t in texts]
 print(texts_with_instruct[0])
 
-# %% 检测保存文件个数，意外中断后重新开始
+# %% Detect the number of saved files and resume after an unexpected interruption
 folder_path = "./nonfill_module"
 os.makedirs(folder_path, exist_ok=True)
 existing_files = {f for f in os.listdir(folder_path) if f.endswith(".npy")}
@@ -151,7 +151,7 @@ print(len(existing_files))
 # %%
 for group_name, features in config.items():
     
-    # 清理组名，用于文件名安全（去除特殊字符）
+    # Clean group names for filename safety (remove special characters)
     cleaned_group_name = ''.join(c if c.isalpha() or c.isdigit() else '_' for c in group_name)
     file_name = f"text_embeddings_{cleaned_group_name}.npy"
     
@@ -161,21 +161,21 @@ for group_name, features in config.items():
     
     print(f"Processing Group: {group_name} (contains {len(features)} features) ----------")
     
-    # 复制原始数据
+    # Copy the original data
     df_ablation = df_x.copy()
     
-    # 将该组内所有的特征列设为 'Unknown'
+    # Set all feature columns in this group to 'Unknown'
     existing_cols_in_df = features
     #print(existing_cols_in_df)
     df_ablation[existing_cols_in_df] = 'Unknown'
 
     
-    # 4. 转换为结构化文本
-    # 假设 row_to_structured_text, get_detailed_instruct, task, context 已在前面定义
+    # 4. Convert to structured text
+    # Assume row_to_structured_text, get_detailed_instruct, task, and context are defined above
     texts = df_ablation.apply(row_to_structured_text, axis=1).tolist()
     texts_with_instruct = [get_detailed_instruct(task, t, context) for t in texts]
     
-    # 5. 生成 Embedding
+    # 5. Generate embeddings
     embeddings = model.encode(
         texts_with_instruct, 
         batch_size=16, 
@@ -183,7 +183,7 @@ for group_name, features in config.items():
         convert_to_numpy=True
     )
     
-    # 6. 保存结果
+    # 6. Save results
     save_path = os.path.join(folder_path, file_name)
     np.save(save_path, embeddings)
     print(f"Saved: {save_path}")

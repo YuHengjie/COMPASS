@@ -22,10 +22,10 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, accuracy_score, precision_score, recall_score
 import argparse
 import json
-# 设定设备
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 设置随机数种子
+# Set random seed
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -36,7 +36,7 @@ set_seed(42)
 
 # %%
 # ================================
-# Step 2: 构建 Dataset
+# Step 2: Build Dataset
 # ================================
 class EmbeddingPairDataset(Dataset):
     def __init__(self, df, text_embed_data, pro_esm_dict, pro_esmfold_dict):
@@ -70,14 +70,14 @@ class EmbeddingPairDataset(Dataset):
 # %%
 class CrossAttentionClassifierGated(nn.Module):
     def __init__(self, 
-                 x_dim,              # 文本 / 纳米材料特征维度
-                 pro_seq_dim,        # 蛋白序列特征维度（如 ESM2: 2560）
-                 pro_str_dim,        # 蛋白结构特征维度（如 ESMFold: 384）
+                 x_dim,              # Text / nanomaterial feature dimension
+                 pro_seq_dim,        # Protein sequence feature dimension (e.g. ESM2: 2560)
+                 pro_str_dim,        # Protein structure feature dimension (e.g. ESMFold: 384)
                  hidden_dim=1024, 
                  dropout=0.3):
         super().__init__()
 
-        # --------- 文本侧：保持不变 ---------
+        # --------- Text branch: unchanged ---------
         self.x_mlp = nn.Sequential(
             nn.Linear(x_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
@@ -85,7 +85,7 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # --------- 注意力：保持不变 ---------
+        # --------- Attention: unchanged ---------
         self.attn  = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=8,
@@ -93,7 +93,7 @@ class CrossAttentionClassifierGated(nn.Module):
             dropout=dropout/2
         )
         
-        # --------- 分类头：保持不变 ---------
+        # --------- Classification head: unchanged ---------
         self.classifier  = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim//4),
@@ -102,14 +102,14 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Linear(hidden_dim//4, hidden_dim//16),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim//16, 1)  # 二分类 logits（配合 BCEWithLogitsLoss）
+            nn.Linear(hidden_dim//16, 1)  # Binary logits (with BCEWithLogitsLoss)
         )
  
-        # 初始化参数 
+        # Initialize parameters
         self._init_weights()
  
     def _init_weights(self):
-        # 原本的 x_mlp / pro_mlp / classifier 里的 Linear
+        # Linear layers originally in x_mlp / pro_mlp / classifier
         for module in [self.x_mlp, self.classifier]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
@@ -124,13 +124,13 @@ class CrossAttentionClassifierGated(nn.Module):
         pro_str_embed : [B, pro_str_dim]  (ESMFold 或结构特征)
         """
 
-        # --------- 文本侧：保持不变 ---------
+        # --------- Text branch: unchanged ---------
         x_feat = self.x_mlp(x_embed)        # [B, hidden_dim]
         
-        # --------- 交叉注意力：保持不变 ---------
+        # --------- Cross-attention: unchanged ---------
         x_tok   = x_feat.unsqueeze(1)   # [B, 1, hidden_dim]
         
-        # 保留其他不变，减少代码修改，只使用文本模态
+        # Keep the rest unchanged and use only the text modality
         attn_out, _ = self.attn(
             query=x_tok,
             key=x_tok,
@@ -141,23 +141,23 @@ class CrossAttentionClassifierGated(nn.Module):
         fused_feature = x_tok + attn_out          # [B, 1, hidden_dim]
         fused_feature = fused_feature.squeeze(1)  # [B, hidden_dim]
         
-        # --------- 分类输出：保持不变 ---------
+        # --------- Classification output: unchanged ---------
         logits = self.classifier(fused_feature).squeeze(-1)   # [B]
 
-        # 返回 logits + gate，方便后面分析 gate 的使用情况
+        # Return logits + gate for later analysis of gate usage
         return logits, None
 
 # %%
 def print_model_params_count(model):
-    # 遍历模型的每一个子模块
+    # Iterate over every submodule of the model
     for name, module in model.named_modules():
         num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
-        if num_params > 0:  # 只打印有参数的模块
+        if num_params > 0:  # Print only modules with parameters
             print(f"Layer: {name}, Number of parameters: {num_params}")
 
 # %%
 # -------------------------
-# 4) 评估工具
+# 4) Evaluation utilities
 # -------------------------
 @torch.no_grad()
 def _eval_cls(logits_all, y_all, sample_weight=None, thresh=0.5):
@@ -165,7 +165,7 @@ def _eval_cls(logits_all, y_all, sample_weight=None, thresh=0.5):
     y_true = torch.tensor(y_all).numpy().astype(int)
     sw = None if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
 
-    # 可能出现单类，做 NaN 保护
+    # Protect against NaN when only one class is present
     if len(np.unique(y_true)) > 1:
         auroc = roc_auc_score(y_true, probs, sample_weight=sw)
         aupr = average_precision_score(y_true, probs, sample_weight=sw)
@@ -215,9 +215,9 @@ def evaluate_on_loader(model, loader, threshold=0.5, auto_find=True, sample_weig
 
     sw = w_all if sample_weighted else None
 
-    # 固定阈值 0.5
+    # Fixed threshold 0.5
     auroc_05, aupr_05, f1_05, precision_05, recall_05, acc_05, probs = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.5)
-    # 新增：固定阈值 0.25
+    # New: fixed threshold 0.25
     auroc_025, aupr_025, f1_025, precision_025, recall_025, acc_025, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.25)
 
     base_dict = {
@@ -235,7 +235,7 @@ def evaluate_on_loader(model, loader, threshold=0.5, auto_find=True, sample_weig
             "AUROC": auroc_b, "AUPRC": aupr_b, "F1": f1_b, "Precision": precision_b, "Recall": recall_b, "ACC": acc_b, "thr": best_thr
         }
 
-    # 使用给定阈值
+    # Use the given threshold
     auroc_t, aupr_t, f1_t, precision_t, recall_t, acc_t, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=threshold)
     base_dict["metrics@thr"] = {"AUROC": auroc_t, "AUPRC": aupr_t, "F1": f1_t, "Precision": precision_t, "Recall": recall_t, "ACC": acc_t, "thr": threshold}
     return base_dict
@@ -256,7 +256,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     if not isinstance(hist, dict):
         raise ValueError(f"History file is not a dict-like object: {history_path}")
 
-    # 根据阶段选择字段
+    # Select fields according to stage
     if load_stage in (1, 5):
         metric_key = "aupr"
         thr_key = "best_thresh"
@@ -266,11 +266,11 @@ def load_threshold_from_history(history_path, load_stage: int):
     else:
         raise ValueError(f"Unsupported load_stage={load_stage}. Expected one of {{1,2,3,4,5}}.")
 
-    # 读取指标与阈值列表
+    # Read metric and threshold lists
     metrics = np.array(hist.get(metric_key, []), dtype=float)
     thr_list = np.array(hist.get(thr_key, []), dtype=float)
 
-    # 健壮性检查
+    # Robustness check
     if metrics.size == 0:
         raise ValueError(f"'{metric_key}' is empty or missing in {history_path}. keys={list(hist.keys())}")
     if thr_list.size == 0:
@@ -282,7 +282,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     if np.all(np.isnan(metrics)):
         raise ValueError(f"All values in '{metric_key}' are NaN in {history_path}.")
 
-    # 取最优指标对应的索引
+    # Get the index of the best metric
     metrics_safe = np.where(np.isnan(metrics), -np.inf, metrics)
     best_idx = int(np.argmax(metrics_safe))
 
@@ -290,7 +290,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     best_metric = float(metrics[best_idx])
     return thr, best_idx, best_metric
 
-# =============== 安全 JSON 转换 ===============
+# =============== Safe JSON conversion ===============
 def _to_py(obj):
     """把 numpy / torch 类型安全转成原生 Python 类型，便于 json.dump。"""
     try:
@@ -312,9 +312,9 @@ def _to_py(obj):
 # %%
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate classifier on test set")
-    # 路径参数
+    # Path parameter
     parser.add_argument("--save_dir", type=str, default="./output", help="目录中通常包含 checkpoint 与 history")
-     # 阈值策略
+     # Threshold strategy
     parser.add_argument("--threshold", type=str, default="from_history",
                         choices=["0.5", "auto", "from_history"],
                         help="阈值策略：0.5 / auto(在测试集上寻优) / from_history(从history取阈值)")
@@ -323,37 +323,37 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--num_workers", type=int, default=8)
 
-    # 兼容在 Jupyter 中直接运行
+    # Compatible with running directly in Jupyter
     if 'ipykernel' in sys.modules or 'IPython' in sys.modules:
         print("Running in Jupyter/IPython environment, using default arguments.")
         args = parser.parse_args([])
     else:
         args = parser.parse_args()
 
-    # -------- 数据加载 --------
+    # -------- Data loading --------
     print("Loading data...")
-    # 读取第一个文件
+    # Read the first file
     with open("../protein_embedding/protein_embeddings_all_esm.pkl", "rb") as f:
         pro_esm_dict = pickle.load(f)
         
    
-    # 检查第一个条目的数组维度
-    first_key = next(iter(pro_esm_dict))  # 获取第一个键
+    # Check the array dimension of the first entry
+    first_key = next(iter(pro_esm_dict))  # Get the first key
     array_shape = pro_esm_dict[first_key].shape
     print(f"Array shape (pro_esm_dict) for {first_key}: {array_shape}")
 
    
-    # 读取第一个文件
+    # Read the first file
     with open("../protein_embedding/protein_embeddings_all_esmfold.pkl", "rb") as f:
         pro_esmfold_dict = pickle.load(f)
         
     
-    # 检查第一个条目的数组维度
-    first_key = next(iter(pro_esmfold_dict))  # 获取第一个键
+    # Check the array dimension of the first entry
+    first_key = next(iter(pro_esmfold_dict))  # Get the first key
     array_shape = pro_esmfold_dict[first_key].shape
     print(f"Array shape (pro_esmfold_dict) for {first_key}: {array_shape}")
 
-    text_embed_data = np.load("../text_embedding/text_embeddings_nonfill.npy")  # 替换为文件路径
+    text_embed_data = np.load("../text_embedding/text_embeddings_nonfill.npy")  # Replace with the file path
     print(f"Shape for text embedding: {text_embed_data.shape}")
     
     x_dim = text_embed_data.shape[1]
@@ -361,7 +361,7 @@ if __name__ == '__main__':
     pro_esmfold_dim = next(iter(pro_esmfold_dict.values())).shape[0]
     
     
-    # --------- 准备测试集与 DataLoader（只构建一次）---------
+    # --------- Prepare test set and DataLoader (build once) ---------
     test_in_df  = pd.read_csv("data/basic_plasma_human_high_test.csv", keep_default_na=False, na_values=[''])
 
     test_in_loader = DataLoader(
@@ -369,15 +369,15 @@ if __name__ == '__main__':
         batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
-    # --------- 扫描可用阶段 N ---------
+    # --------- Scan available stages N ---------
     # ==============================
-    # 新：把 save_dir 当作“根目录”，遍历其下所有子文件夹
+    # New: treat save_dir as the root and iterate over all its subfolders
     # ==============================
-    root_dir = args.save_dir  # 现在应为 ./output
+    root_dir = args.save_dir  # Should now be ./output
     if not os.path.isdir(root_dir):
         raise NotADirectoryError(f"--save_dir is not a directory: {root_dir}")
 
-    # 罗列所有子文件夹（只取一级，忽略隐藏目录）
+    # List all subfolders (first level only, ignore hidden directories)
     subdirs = sorted(
         d.name for d in os.scandir(root_dir)
         if d.is_dir() and not d.name.startswith('.')
@@ -392,7 +392,7 @@ if __name__ == '__main__':
         work_dir = os.path.join(root_dir, sub)
         print(f"\n==================== Evaluating subfolder: {work_dir} ====================")
 
-        # --------- 扫描可用阶段 N（优先 history_stage_N.pt，其次 saved_model_stage_N.pt 与 history_stage_N.npy） ---------
+        # --------- Scan available stages N (prefer history_stage_N.pt, then saved_model_stage_N.pt and history_stage_N.npy) ---------
         stage_nums = set()
         for name in os.listdir(work_dir):
             m = re.match(r"history_stage_(\d+)\.pt$", name)
@@ -413,14 +413,14 @@ if __name__ == '__main__':
 
         sub_summary = {}
         
-        # --------- 逐阶段评估 ---------
+        # --------- Evaluate stage by stage ---------
         for load_stage in stage_nums:
             ckpt_path = os.path.join(work_dir, f"saved_model_stage_{load_stage}.pt")
             if not os.path.exists(ckpt_path):
                 print(f"⚠️  Checkpoint not found for stage {load_stage}: {ckpt_path}  -> skip this stage")
                 continue
 
-            # 每个阶段重新加载权重（模型结构一致）
+            # Reload weights at each stage (the model structure is the same)
             model = CrossAttentionClassifierGated(x_dim, pro_esm_dim, pro_esmfold_dim).to(device)
             model.load_state_dict(torch.load(ckpt_path, map_location=device))
             print(f"\n--------- Load from stage {load_stage} ---------")
@@ -430,7 +430,7 @@ if __name__ == '__main__':
             history_path = os.path.join(work_dir, f"history_stage_{load_stage}.npy")
             thr_history, best_idx, best_metric = load_threshold_from_history(history_path, load_stage)
 
-            # 内部集
+            # Internal set
             results_in = evaluate_on_loader(model, test_in_loader, thr_history)
             print("\n========== Internal Test ==========")
             
@@ -462,7 +462,7 @@ if __name__ == '__main__':
                 },
             }
             
-        # --- 保存 JSON ---
+        # --- Save JSON ---
         sub_json_path = os.path.join(work_dir, "eval_results.json")
         with open(sub_json_path, "w", encoding="utf-8") as f:
             json.dump(_to_py(sub_summary), f, ensure_ascii=False, indent=2)
@@ -470,10 +470,10 @@ if __name__ == '__main__':
         
         
     # ----------------------
-    # 读取所有 eval_results.json
+    # Read all eval_results.json
     # ----------------------
 
-    root_dir = "./output"   # 和训练输出一致
+    root_dir = "./output"   # Consistent with training output
     summary_rows = []
 
     for sub in sorted(os.listdir(root_dir)):
@@ -483,21 +483,21 @@ if __name__ == '__main__':
         if not os.path.isfile(json_path):
             continue
 
-        # 读取 JSON
+        # Read JSON
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         # data: { "1": {...}, "2": {...}, ... }
-        # 遍历每个 stage
+        # Iterate over each stage
         for stage, content in data.items():
             score_thr =  content["internal"]["at_thr"]
 
-            # 计算两项指标的均值
+            # Compute the mean of the two metrics
             mean_score = (score_thr["AUROC"] + score_thr["F1"] ) / 2.0
         
             summary_rows.append({
-                "framework": sub,      # 如 stage_1345
-                "stage": int(stage),   # 具体 checkpoint 的 stage 号
+                "framework": sub,      # e.g. stage_1345
+                "stage": int(stage),   # Stage number of the specific checkpoint
                 "AUROC": score_thr["AUROC"],
                 "AUPRC": score_thr["AUPRC"],
                 "F1": score_thr["F1"],
@@ -509,17 +509,17 @@ if __name__ == '__main__':
             })
 
     # ----------------------
-    # 生成 DataFrame
+    # Generate DataFrame
     # ----------------------
     df_summary = pd.DataFrame(summary_rows)
 
-    # 按 external at_thr 的 Mean_Score 排序
+    # Sort by Mean_Score at external at_thr
     df_sorted = df_summary.sort_values(by="Mean_Score (F1&AUROC)", ascending=False)
 
     print("\n===== Sorted by at_thr Mean_Score =====")
     print(df_sorted.head(20))
 
-    # 保存成 CSV
+    # Save as CSV
     output_csv = "eval_summary_internal.csv"
     output_dir = os.path.join(root_dir, output_csv)
     df_sorted.to_csv(output_dir, index=False, encoding="utf-8")

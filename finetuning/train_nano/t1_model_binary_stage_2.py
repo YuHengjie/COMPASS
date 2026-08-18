@@ -21,10 +21,10 @@ from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, ac
 import sys
 import argparse
 
-# 设定设备
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 设置随机数种子
+# Set random seed
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -35,7 +35,7 @@ set_seed(42)
 
 # %%
 # ================================
-# Step 2: 构建 Dataset
+# Step 2: Build Dataset
 # ================================
 class EmbeddingPairDataset(Dataset):
     def __init__(self, df, text_embed_data, pro_esm_dict, pro_esmfold_dict):
@@ -68,14 +68,14 @@ class EmbeddingPairDataset(Dataset):
 # %%
 class CrossAttentionClassifierGated(nn.Module):
     def __init__(self, 
-                 x_dim,              # 文本 / 纳米材料特征维度
-                 pro_seq_dim,        # 蛋白序列特征维度（如 ESM2: 2560）
-                 pro_str_dim,        # 蛋白结构特征维度（如 ESMFold: 384）
+                 x_dim,              # Text / nanomaterial feature dimension
+                 pro_seq_dim,        # Protein sequence feature dimension (e.g. ESM2: 2560)
+                 pro_str_dim,        # Protein structure feature dimension (e.g. ESMFold: 384)
                  hidden_dim=1024, 
                  dropout=0.3):
         super().__init__()
 
-        # --------- 文本侧：保持不变 ---------
+        # --------- Text branch: unchanged ---------
         self.x_mlp = nn.Sequential(
             nn.Linear(x_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
@@ -83,9 +83,9 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # --------- 蛋白侧：seq/struct 各自投影到 hidden_dim，再融合 ---------
+        # --------- Protein branch: project seq/struct to hidden_dim, then fuse ---------
 
-        # 序列 & 结构各自投影到 hidden_dim（和 x_mlp 对齐）
+        # Project sequence and structure to hidden_dim (aligned with x_mlp)
         self.proj_seq = nn.Sequential(
             nn.Linear(pro_seq_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
@@ -100,8 +100,8 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # 维度级残差门控：输入 concat([seq_h, str_h]) ∈ R^{B×2H}
-        # 输出 gate g ∈ (0,1)^{B×H}
+        # Dimension-wise residual gating: input concat([seq_h, str_h]) in R^{B×2H}
+        # Output gate g in (0,1)^{B×H}
         self.pro_gate = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -109,15 +109,15 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Sigmoid()
         )
 
-        # 融合后的蛋白向量，再过一层 BN + ReLU + Dropout
-        # 注意：这里没有 Linear，保持“只有一层映射到 hidden_dim”的设定
+        # Apply BN + ReLU + Dropout again to the fused protein vector
+        # There is no Linear layer here, keeping only one mapping to hidden_dim
         self.pro_mlp  = nn.Sequential(
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
-        # --------- 注意力：保持不变 ---------
+        # --------- Attention: unchanged ---------
         self.attn  = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=8,
@@ -125,7 +125,7 @@ class CrossAttentionClassifierGated(nn.Module):
             dropout=dropout/2
         )
         
-        # --------- 分类头：保持不变 ---------
+        # --------- Classification head: unchanged ---------
         self.classifier  = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim//4),
@@ -134,30 +134,30 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Linear(hidden_dim//4, hidden_dim//16),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim//16, 1)  # 二分类 logits（配合 BCEWithLogitsLoss）
+            nn.Linear(hidden_dim//16, 1)  # Binary logits (with BCEWithLogitsLoss)
         )
  
-        # 初始化参数 
+        # Initialize parameters
         self._init_weights()
  
     def _init_weights(self):
-        # 原本的 x_mlp / pro_mlp / classifier 里的 Linear
+        # Linear layers originally in x_mlp / pro_mlp / classifier
         for module in [self.x_mlp, self.classifier]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
                     nn.init.constant_(layer.bias, 0.1)
 
-        # 新增的 proj_seq / proj_str / pro_gate 里的 Linear
+        # New Linear layers in proj_seq / proj_str / pro_gate
         for m in [self.proj_seq, self.proj_str] + \
                  [l for l in self.pro_gate if isinstance(l, nn.Linear)]:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
                 nn.init.constant_(m.bias, 0.0)
 
-        # 可选：把门控最后一层 bias 初始化为略偏向“序列”
+        # Optional: initialize the final gate bias slightly toward sequence
         last_linear = [l for l in self.pro_gate if isinstance(l, nn.Linear)][-1]
-        nn.init.constant_(last_linear.bias, -1.0)  # sigmoid(-1)≈0.27，初始更偏 seq
+        nn.init.constant_(last_linear.bias, -1.0)  # sigmoid(-1)≈0.27, initially biased toward seq
 
     def forward(self, x_embed, pro_seq_embed, pro_str_embed):
         """
@@ -166,26 +166,26 @@ class CrossAttentionClassifierGated(nn.Module):
         pro_str_embed : [B, pro_str_dim]  (ESMFold 或结构特征)
         """
 
-        # --------- 文本侧：保持不变 ---------
+        # --------- Text branch: unchanged ---------
         x_feat = self.x_mlp(x_embed)        # [B, hidden_dim]
 
-        # --------- 蛋白序列+结构的融合 ---------
-        # 1) 各自投影到 hidden_dim
+        # --------- Protein sequence + structure fusion ---------
+        # 1) Project each to hidden_dim
         seq_h = self.proj_seq(pro_seq_embed)   # [B, hidden_dim]
         str_h = self.proj_str(pro_str_embed)   # [B, hidden_dim]
 
-        # 2) 维度级残差门控
-        #    g ∈ (0,1)^{B×hidden_dim}，每个维度一个 gate
+        # 2) Dimension-wise residual gating
+        # Each dimension has one gate: g in (0,1)^{B×hidden_dim}
         g = self.pro_gate(torch.cat([seq_h, str_h], dim=-1))      # [B, hidden_dim]
 
-        # 3) 残差形式：从 seq_h 出发，用结构做纠偏
-        #    g ≈ 0 → 接近 seq_h； g ≈ 1 → 接近 str_h
+        # 3) Residual form: start from seq_h and correct with structure
+        # g ≈ 0 -> close to seq_h; g ≈ 1 -> close to str_h
         pro_fused = seq_h + g * (str_h - seq_h)                   # [B, hidden_dim]
 
-        # 4) 再过 BN + ReLU + Dropout（和 x_mlp 风格一致）
+        # 4) Apply BN + ReLU + Dropout again (consistent with x_mlp style)
         pro_feat = self.pro_mlp(pro_fused)                        # [B, hidden_dim]
         
-        # --------- 交叉注意力：保持不变 ---------
+        # --------- Cross-attention: unchanged ---------
         x_tok   = x_feat.unsqueeze(1)   # [B, 1, hidden_dim]
         pro_tok = pro_feat.unsqueeze(1) # [B, 1, hidden_dim]
         
@@ -199,10 +199,10 @@ class CrossAttentionClassifierGated(nn.Module):
         fused_feature = x_tok + attn_out          # [B, 1, hidden_dim]
         fused_feature = fused_feature.squeeze(1)  # [B, hidden_dim]
         
-        # --------- 分类输出：保持不变 ---------
+        # --------- Classification output: unchanged ---------
         logits = self.classifier(fused_feature).squeeze(-1)   # [B]
 
-        # 返回 logits + gate，方便后面分析 gate 的使用情况
+        # Return logits + gate for later analysis of gate usage
         return logits, g
 
 
@@ -307,7 +307,7 @@ def train_and_validate_cls(model, train_loader, val_in_loader, val_out_loader,
             optimizer.zero_grad(set_to_none=True)
             logits, _ = model(text, pro_seq, pro_str)
             
-            # 逐样本权重 + 正例权重（pos_weight）
+            # Per-sample weight + positive-class weight (pos_weight)
             loss = F.binary_cross_entropy_with_logits(
                 logits, y, weight=w, pos_weight=pos_weight, reduction='mean'
             )
@@ -321,7 +321,7 @@ def train_and_validate_cls(model, train_loader, val_in_loader, val_out_loader,
         # ---- validate on both sets ----
         res_in  = _validate_on_loader(model, val_in_loader,  device, pos_weight=pos_weight)
         res_out = _validate_on_loader(model, val_out_loader,  device, pos_weight=pos_weight)
-        avg_aupr = np.nanmean([res_in['aupr'], res_out['aupr']])  # 保存/调度看均值
+        avg_aupr = np.nanmean([res_in['aupr'], res_out['aupr']])  # Save/schedule based on the mean
 
         # ---- log ----
         cur_lr = scheduler.optimizer.param_groups[0]['lr']
@@ -370,10 +370,10 @@ def train_and_validate_cls(model, train_loader, val_in_loader, val_out_loader,
 
 # %%
 def print_model_params_count(model):
-    # 遍历模型的每一个子模块
+    # Iterate over every submodule of the model
     for name, module in model.named_modules():
         num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
-        if num_params > 0:  # 只打印有参数的模块
+        if num_params > 0:  # Print only modules with parameters
             print(f"Layer: {name}, Number of parameters: {num_params}")
 
 # %%
@@ -382,54 +382,54 @@ def print_model_params_count(model):
 # ==============================================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Stage 2 Model Training Script")
-    # 可配置参数
+    # Configurable parameters
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--lr', type=float, default=1.5e-4, help="Initial learning rate")
     parser.add_argument('--save_dir', type=str, default='./output/basic', help="Directory to save model and history")
     parser.add_argument('--batch_size', type=int, default=4096, help="Batch size")
     parser.add_argument('--num_workers', type=int, default=8, help="Number of data loader workers")
     
-    # 【新增参数】用于指定加载模型的阶段编号 (1, 2, 3, 4, 或 5)
+    # [New parameter] stage number of the model to load (1, 2, 3, 4, or 5)
     parser.add_argument('--load_stage', type=int, default=1, 
                         help="Stage number (N) of the model checkpoint to load (e.g., 1 loads saved_model_stage_1.pt).")
     
-    # 检查是否在 Jupyter/IPython 环境中
+    # Check whether running in a Jupyter/IPython environment
     if 'ipykernel' in sys.modules or 'IPython' in sys.modules:
-        # 如果在 Jupyter 中，则解析一个空列表，使用默认参数
+        # In Jupyter, parse an empty list and use default parameters
         print("Running in Jupyter/IPython environment, using default arguments.")
         args = parser.parse_args([])
     else:
-        # 否则，解析命令行参数
+        # Otherwise, parse command-line arguments
         args = parser.parse_args()
         
-    # --- 4.1 数据加载 ---
+    # --- 4.1 Data loading ---
 
-    # 读取第一个文件
+    # Read the first file
     with open("../../protein_embedding/protein_embeddings_all_esm.pkl", "rb") as f:
         pro_esm_dict = pickle.load(f)
         
-    # 检查第一个条目的数组维度
-    first_key = next(iter(pro_esm_dict))  # 获取第一个键
+    # Check the array dimension of the first entry
+    first_key = next(iter(pro_esm_dict))  # Get the first key
     array_shape = pro_esm_dict[first_key].shape
     print(f"Array shape (pro_esm_dict) for {first_key}: {array_shape}")
 
-    # 读取第一个文件
+    # Read the first file
     with open("../../protein_embedding/protein_embeddings_all_esmfold.pkl", "rb") as f:
         pro_esmfold_dict = pickle.load(f)
         
-    # 检查第一个条目的数组维度
-    first_key = next(iter(pro_esmfold_dict))  # 获取第一个键
+    # Check the array dimension of the first entry
+    first_key = next(iter(pro_esmfold_dict))  # Get the first key
     array_shape = pro_esmfold_dict[first_key].shape
     print(f"Array shape (pro_esmfold_dict) for {first_key}: {array_shape}")
 
-    text_embed_data = np.load("../../text_embedding/text_embeddings_nonfill.npy")  # 替换为文件路径
+    text_embed_data = np.load("../../text_embedding/text_embeddings_nonfill.npy")  # Replace with the file path
     print(f"Shape for text embedding: {text_embed_data.shape}")
 
     train_df = pd.read_csv("data/basic_serum_human_plasma_low_addhigh100_train.csv",keep_default_na=False, na_values=[''])
     val_in_df = pd.read_csv("data/basic_serum_human_plasma_low_addhigh100_val.csv",keep_default_na=False, na_values=[''])
     val_out_df = pd.read_csv("data/basic_plasma_human_high_val.csv",keep_default_na=False, na_values=[''])
 
-    # --- 4.2 数据集和 DataLoader ---
+    # --- 4.2 Dataset and DataLoader ---
     # Create datasets with the modified class
     train_dataset = EmbeddingPairDataset(train_df, text_embed_data, pro_esm_dict, pro_esmfold_dict)
     val_in_dataset = EmbeddingPairDataset(val_in_df, text_embed_data, pro_esm_dict, pro_esmfold_dict)
@@ -439,8 +439,8 @@ if __name__ == '__main__':
     val_in_loader = DataLoader(val_in_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     val_out_loader = DataLoader(val_out_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    # --- 4.3 模型初始化 ---
-    # 获取维度
+    # --- 4.3 Model initialization ---
+    # Get dimensions
     x_dim = text_embed_data.shape[1]
     pro_esm_dim = next(iter(pro_esm_dict.values())).shape[0]
     pro_esmfold_dim = next(iter(pro_esmfold_dict.values())).shape[0]
@@ -448,27 +448,27 @@ if __name__ == '__main__':
     stage_ckpt = os.path.join(
                     args.save_dir, 
                     f'saved_model_stage_{args.load_stage}.pt'
-                    )  # 保存的路径
+                    )  # Save path
     model = CrossAttentionClassifierGated(x_dim, pro_esm_dim, pro_esmfold_dim).to(device)
     model.load_state_dict(torch.load(stage_ckpt, map_location=device))
     print(f"Loaded {args.load_stage} best weights.")
-    # 调用函数打印每一层的参数量
+    # Call the function to print the parameter count of each layer
     print_model_params_count(model)
     
-    # --- 4.4 计算 pos_weight ---
-    # 统计类别分布 
+    # --- 4.4 Compute pos_weight ---
+    # Count class distribution
     class_counts = train_df['Protein corona composition'].value_counts()
 
-    # 获取具体数值 
-    num_neg = class_counts.get(0,  0)  # 负样本数（类别0）
-    num_pos = class_counts.get(1,  0)  # 正样本数（类别1）
+    # Get the specific value
+    num_neg = class_counts.get(0,  0)  # Negative count (class 0)
+    num_pos = class_counts.get(1,  0)  # Positive count (class 1)
 
-    # 计算比例
+    # Compute the ratio
     pos_weight_val = 2 * num_neg / num_pos if num_pos > 0 else 1.0
     pos_weight = torch.tensor([pos_weight_val], device=device)
     print(f"Positive samples: {num_pos}, Negative samples: {num_neg}, pos_weight: {pos_weight_val:.4f}")
     
-    # --- 4.5 启动训练 ---
+    # --- 4.5 Start training ---
     print('\n***********Start Training Stage-2***********')
     history = train_and_validate_cls(
         model, train_loader, val_in_loader, val_out_loader,

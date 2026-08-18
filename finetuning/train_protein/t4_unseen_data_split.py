@@ -39,9 +39,9 @@ train_df_100.to_csv('data/protein_external_plasma_human_train_100.csv', index=Fa
 val_df_100.to_csv('data/protein_external_plasma_human_val_100.csv', index=False)
 
 
-# %% 获得特定比例的训练集
+# %% Obtain training sets with specific fractions
 for p in np.arange(0.1, 1.0, 0.1):  # 0.1 ~ 0.9
-    # 1) 分层抽样得到 train_df_sub
+    # 1) Stratified sampling to obtain train_df_sub
     train_df_sub, _ = train_test_split(
         train_df,
         test_size=1 - p,
@@ -51,7 +51,7 @@ for p in np.arange(0.1, 1.0, 0.1):  # 0.1 ~ 0.9
 
     print(f"p={p:.1f}, ratio={len(train_df_sub)/len(train_df):.4f}, n={len(train_df_sub)}")
 
-    # 2) 不分层，随机划分 train/val
+    # 2) Random split into train/val without stratification
     train_df_final, val_df_final = train_test_split(
         train_df_sub,
         test_size=0.2,

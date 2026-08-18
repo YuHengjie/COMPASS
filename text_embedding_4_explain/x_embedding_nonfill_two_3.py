@@ -149,7 +149,7 @@ print(texts_with_instruct[0])
 feature_pairs = list(itertools.combinations(feature_columns, 2))
 feature_pairs
 
-# %% 检测保存文件个数，意外中断后重新开始
+# %% Detect the number of saved files and resume after an unexpected interruption
 folder_path = "./nonfill_two"
 os.makedirs(folder_path, exist_ok=True)
 
@@ -168,19 +168,19 @@ for col1, col2 in feature_pairs[100:150]:
     file_path = f"./nonfill_two/{file_name}"
     file_path_r = f"./nonfill_two/{file_name_r}"
 
-    # 1️⃣ 正向文件已存在，直接跳过
+    # Forward file exists, skip
     if file_name in existing_files:
         print(f'Skipping {col1} and {col2} (forward exists) ----------')
         continue
 
-    # 2️⃣ 反向文件存在：读取并另存为正向
+    # Reverse file exists: read and save as the forward case
     if file_name_r in existing_files:
         print(f'Found reverse file for {col1} and {col2}, copying ----------')
         embeddings = np.load(file_path_r)
         np.save(file_path, embeddings)
         continue
 
-    # 3️⃣ 两者都不存在，正常计算
+    # Neither case exists, compute normally
     print(f'Processing {col1} and {col2} ----------')
 
     df_pair = df_x.copy()

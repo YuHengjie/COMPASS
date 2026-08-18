@@ -4,31 +4,31 @@ import torch
 from tqdm import tqdm
 import pickle
 import pandas as pd
-# 使用 GPU（如果可用）
+# Use GPU when available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # %%
 df = pd.read_excel("protein_seq_20250418.xlsx", index_col=0)
-df = df.iloc[17000:,:]  # 仅处理前 1000 条数据
+df = df.iloc[17000:,:]  # Process only the first 1000 records
 df
 
-# %% 加载 tokenizer 和模型
+# %% Load tokenizer and model
 model_path = "/yuhengjie/backup/pretrainedmodel/esm2_t36_3B_UR50D"
 
-# 加载 tokenizer 和模型
+# Load tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModel.from_pretrained(model_path, torch_dtype=torch.bfloat16)
 model = model.to(device)
 model.eval()
 
 # %%
-# 设定 batch size
-batch_size = 8  # 根据 GPU 显存调节
+# Set batch size
+batch_size = 8  # Adjust according to GPU memory
 
-# 保存结果的 dict
+# Dictionary for saved results
 embedding_dict = {}
 
-# 遍历批次
+# Iterate over batches
 for i in tqdm(range(0, len(df), batch_size), desc="Encoding"):
     batch_df = df.iloc[i:i+batch_size]
     accessions = batch_df["Accession"].tolist()
@@ -46,22 +46,22 @@ for i in tqdm(range(0, len(df), batch_size), desc="Encoding"):
         attention_mask = inputs["attention_mask"]
         embeddings = (last_hidden * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(1, keepdim=True)
 
-    # 保存进 dict
+    # Save into dict
     for acc, emb in zip(accessions, embeddings.cpu()):
-        # 将 bfloat16 转换为 float32
+        # Convert bfloat16 to float32
         emb_float32 = emb.to(torch.float32)
-        # 然后转换为 numpy 数组
+        # Then convert to a NumPy array
         embedding_dict[acc] = emb_float32.numpy()
         
-    # 清理显存
+    # Clear GPU memory
     del inputs
     del outputs
     del last_hidden
     del embeddings
-    torch.cuda.empty_cache()  # 释放显存
+    torch.cuda.empty_cache()  # Free GPU memory
 
 # %%
-# 保存到文件
+# Save to file
 with open("protein_embeddings_2.pkl", "wb") as f:
     pickle.dump(embedding_dict, f)
     

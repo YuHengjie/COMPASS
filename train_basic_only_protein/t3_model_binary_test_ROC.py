@@ -22,10 +22,10 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, average_precision_score, f1_score, accuracy_score
 import argparse
 import json
-# 设定设备
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 设置随机数种子
+# Set random seed
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -36,7 +36,7 @@ set_seed(42)
 
 # %%
 # ================================
-# Step 2: 构建 Dataset
+# Step 2: Build Dataset
 # ================================
 class EmbeddingPairDataset(Dataset):
     def __init__(self, df, text_embed_data, pro_esm_dict, pro_esmfold_dict):
@@ -70,14 +70,14 @@ class EmbeddingPairDataset(Dataset):
 # %%
 class CrossAttentionClassifierGated(nn.Module):
     def __init__(self, 
-                 x_dim,              # 文本 / 纳米材料特征维度（本版本里不参与注意力）
-                 pro_seq_dim,        # 蛋白序列特征维度（如 ESM2: 2560）
-                 pro_str_dim,        # 蛋白结构特征维度（如 ESMFold: 384）
+                 x_dim,              # Text / nanomaterial feature dimension (not used in attention in this version)
+                 pro_seq_dim,        # Protein sequence feature dimension (e.g. ESM2: 2560)
+                 pro_str_dim,        # Protein structure feature dimension (e.g. ESMFold: 384)
                  hidden_dim=1024, 
                  dropout=0.3):
         super().__init__()
 
-        # --------- 蛋白侧：seq/struct 各自投影到 hidden_dim，再融合 ---------
+        # --------- Protein branch: project seq/struct to hidden_dim, then fuse ---------
 
         self.proj_seq = nn.Sequential(
             nn.Linear(pro_seq_dim, hidden_dim),
@@ -93,8 +93,8 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # 维度级残差门控：输入 concat([seq_h, str_h]) ∈ R^{B×2H}
-        # 输出 gate g ∈ (0,1)^{B×H}
+        # Dimension-wise residual gating: input concat([seq_h, str_h]) in R^{B×2H}
+        # Output gate g in (0,1)^{B×H}
         self.pro_gate = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -102,14 +102,14 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Sigmoid()
         )
 
-        # 融合后的蛋白向量，再过一层 BN + ReLU + Dropout
+        # Apply BN + ReLU + Dropout again to the fused protein vector
         self.pro_mlp  = nn.Sequential(
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
-        # --------- 注意力：这里改成 “蛋白自身 self-attention” ---------
+        # --------- Attention: use protein self-attention here ---------
         self.attn  = nn.MultiheadAttention(
             embed_dim=hidden_dim,
             num_heads=8,
@@ -117,7 +117,7 @@ class CrossAttentionClassifierGated(nn.Module):
             dropout=dropout/2
         )
         
-        # --------- 分类头：保持不变 ---------
+        # --------- Classification head: unchanged ---------
         self.classifier  = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim//4),
@@ -126,30 +126,30 @@ class CrossAttentionClassifierGated(nn.Module):
             nn.Linear(hidden_dim//4, hidden_dim//16),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim//16, 1)  # 二分类 logits（配合 BCEWithLogitsLoss）
+            nn.Linear(hidden_dim//16, 1)  # Binary logits (with BCEWithLogitsLoss)
         )
  
-        # 初始化参数 
+        # Initialize parameters
         self._init_weights()
  
     def _init_weights(self):
-        # 原本的 x_mlp / classifier 里的 Linear
+        # Linear layers originally in x_mlp / classifier
         for module in [self.classifier]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
                     nn.init.constant_(layer.bias, 0.1)
 
-        # 新增的 proj_seq / proj_str / pro_gate 里的 Linear
+        # New Linear layers in proj_seq / proj_str / pro_gate
         for m in [self.proj_seq, self.proj_str] + \
                  [l for l in self.pro_gate if isinstance(l, nn.Linear)]:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
                 nn.init.constant_(m.bias, 0.0)
 
-        # 可选：把门控最后一层 bias 初始化为略偏向“序列”
+        # Optional: initialize the final gate bias slightly toward sequence
         last_linear = [l for l in self.pro_gate if isinstance(l, nn.Linear)][-1]
-        nn.init.constant_(last_linear.bias, -1.0)  # sigmoid(-1)≈0.27，初始更偏 seq
+        nn.init.constant_(last_linear.bias, -1.0)  # sigmoid(-1)≈0.27, initially biased toward seq
 
     def forward(self, x_embed, pro_seq_embed, pro_str_embed):
         """
@@ -158,56 +158,56 @@ class CrossAttentionClassifierGated(nn.Module):
         pro_str_embed : [B, pro_str_dim]  (ESMFold 或结构特征)
         """
 
-        # --------- 蛋白序列+结构的融合（保持不变） ---------
+        # --------- Protein sequence + structure fusion (unchanged) ---------
         seq_h = self.proj_seq(pro_seq_embed)   # [B, hidden_dim]
         str_h = self.proj_str(pro_str_embed)   # [B, hidden_dim]
 
-        # 维度级残差门控
+        # Dimension-wise residual gating
         g = self.pro_gate(torch.cat([seq_h, str_h], dim=-1))      # [B, hidden_dim]
 
-        # 从 seq_h 出发，用结构做纠偏
+        # Start from seq_h and correct with structure
         pro_fused = seq_h + g * (str_h - seq_h)                   # [B, hidden_dim]
 
-        # 再过 BN + ReLU + Dropout
+        # Apply BN + ReLU + Dropout again
         pro_feat = self.pro_mlp(pro_fused)                        # [B, hidden_dim]
         
-        # --------- 交叉注意力改为“蛋白 self-attention” ---------
-        # 之前是：
+        # --------- Change cross-attention to protein self-attention ---------
+        # Previously:
         #   x_tok   = x_feat.unsqueeze(1)   # [B, 1, H]
         #   pro_tok = pro_feat.unsqueeze(1) # [B, 1, H]
         #   attn_out = attn(query=x_tok, key=pro_tok, value=pro_tok)
         #
-        # 现在改成：
+        # Now changed to:
         pro_tok = pro_feat.unsqueeze(1)   # [B, 1, hidden_dim]
         
         attn_out, _ = self.attn(
-            query=pro_tok,   # ✅ 自注意力：query = pro_tok
+            query=pro_tok,   # Self-attention: query = pro_tok
             key=pro_tok,
             value=pro_tok,
             need_weights=False
         )
         
-        # 残差连接也对 pro_tok 做
+        # Apply the residual connection to pro_tok as well
         fused_feature = pro_tok + attn_out          # [B, 1, hidden_dim]
         fused_feature = fused_feature.squeeze(1)    # [B, hidden_dim]
         
-        # --------- 分类输出：保持不变 ---------
+        # --------- Classification output: unchanged ---------
         logits = self.classifier(fused_feature).squeeze(-1)   # [B]
 
-        # 返回 logits + gate，方便后面分析 gate 的使用情况
+        # Return logits + gate for later analysis of gate usage
         return logits, g
 
 # %%
 def print_model_params_count(model):
-    # 遍历模型的每一个子模块
+    # Iterate over every submodule of the model
     for name, module in model.named_modules():
         num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
-        if num_params > 0:  # 只打印有参数的模块
+        if num_params > 0:  # Print only modules with parameters
             print(f"Layer: {name}, Number of parameters: {num_params}")
 
 # %%
 # -------------------------
-# 4) 评估工具
+# 4) Evaluation utilities
 # -------------------------
 @torch.no_grad()
 def _eval_cls(logits_all, y_all, sample_weight=None, thresh=0.5):
@@ -215,7 +215,7 @@ def _eval_cls(logits_all, y_all, sample_weight=None, thresh=0.5):
     y_true = torch.tensor(y_all).numpy().astype(int)
     sw = None if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
 
-    # 可能出现单类，做 NaN 保护
+    # Protect against NaN when only one class is present
     if len(np.unique(y_true)) > 1:
         auroc = roc_auc_score(y_true, probs, sample_weight=sw)
         aupr = average_precision_score(y_true, probs, sample_weight=sw)
@@ -261,9 +261,9 @@ def evaluate_on_loader(model, loader, threshold=0.5, auto_find=True, sample_weig
 
     sw = w_all if sample_weighted else None
 
-    # 固定阈值 0.5
+    # Fixed threshold 0.5
     auroc_05, aupr_05, f1_05, acc_05, probs = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.5)
-    # 新增：固定阈值 0.25
+    # New: fixed threshold 0.25
     auroc_025, aupr_025, f1_025, acc_025, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=0.25)
 
     base_dict = {
@@ -281,7 +281,7 @@ def evaluate_on_loader(model, loader, threshold=0.5, auto_find=True, sample_weig
             "AUROC": auroc_b, "AUPRC": aupr_b, "F1": f1_b, "ACC": acc_b, "thr": best_thr
         }
 
-    # 使用给定阈值
+    # Use the given threshold
     auroc_t, aupr_t, f1_t, acc_t, _ = _eval_cls(logits_all, y_all, sample_weight=sw, thresh=threshold)
     base_dict["metrics@thr"] = {"AUROC": auroc_t, "AUPRC": aupr_t, "F1": f1_t, "ACC": acc_t, "thr": threshold}
     return base_dict
@@ -302,7 +302,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     if not isinstance(hist, dict):
         raise ValueError(f"History file is not a dict-like object: {history_path}")
 
-    # 根据阶段选择字段
+    # Select fields according to stage
     if load_stage in (1, 5):
         metric_key = "aupr"
         thr_key = "best_thresh"
@@ -312,11 +312,11 @@ def load_threshold_from_history(history_path, load_stage: int):
     else:
         raise ValueError(f"Unsupported load_stage={load_stage}. Expected one of {{1,2,3,4,5}}.")
 
-    # 读取指标与阈值列表
+    # Read metric and threshold lists
     metrics = np.array(hist.get(metric_key, []), dtype=float)
     thr_list = np.array(hist.get(thr_key, []), dtype=float)
 
-    # 健壮性检查
+    # Robustness check
     if metrics.size == 0:
         raise ValueError(f"'{metric_key}' is empty or missing in {history_path}. keys={list(hist.keys())}")
     if thr_list.size == 0:
@@ -328,7 +328,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     if np.all(np.isnan(metrics)):
         raise ValueError(f"All values in '{metric_key}' are NaN in {history_path}.")
 
-    # 取最优指标对应的索引
+    # Get the index of the best metric
     metrics_safe = np.where(np.isnan(metrics), -np.inf, metrics)
     best_idx = int(np.argmax(metrics_safe))
 
@@ -336,7 +336,7 @@ def load_threshold_from_history(history_path, load_stage: int):
     best_metric = float(metrics[best_idx])
     return thr, best_idx, best_metric
 
-# =============== 安全 JSON 转换 ===============
+# =============== Safe JSON conversion ===============
 def _to_py(obj):
     """把 numpy / torch 类型安全转成原生 Python 类型，便于 json.dump。"""
     try:
@@ -375,7 +375,7 @@ def collect_probs_on_loader(model, loader, device, sample_weighted=True):
         y = y.to(device, non_blocking=True)
         w = w.to(device, non_blocking=True)
 
-        logits, _ = model(text, pro_seq, pro_str)  # 与 evaluate_on_loader 一致
+        logits, _ = model(text, pro_seq, pro_str)  # Same as evaluate_on_loader
         logits_all.append(logits.detach().cpu())
         y_all.append(y.detach().cpu())
         w_all.append(w.detach().cpu())
@@ -384,9 +384,9 @@ def collect_probs_on_loader(model, loader, device, sample_weighted=True):
     y_true = torch.cat(y_all).numpy().astype(int)
     weights = torch.cat(w_all).numpy().astype(float)
 
-    # 你_eval_cls里应该就是 sigmoid(logits) 得到 probs
-    # 这里我们直接显式做：确保 y_prob 是正类概率
-    # 若 logits shape 为 (N,1)/(N,) 都处理成 (N,)
+    # _eval_cls should apply sigmoid(logits) to obtain probabilities
+    # Explicitly ensure y_prob is the positive-class probability
+    # Handle logits shape (N,1)/(N,) as (N,)
     logits_1d = logits_all.reshape(-1)
     y_prob = 1.0 / (1.0 + np.exp(-logits_1d))  # sigmoid
 
@@ -396,30 +396,30 @@ def collect_probs_on_loader(model, loader, device, sample_weighted=True):
     return y_true, y_prob, weights, logits_1d
 
 # %%
-# -------- 数据加载 --------
+# -------- Data loading --------
 print("Loading data...")
-# 读取第一个文件
+# Read the first file
 with open("../protein_embedding/protein_embeddings_all_esm.pkl", "rb") as f:
     pro_esm_dict = pickle.load(f)
     
 
-# 检查第一个条目的数组维度
-first_key = next(iter(pro_esm_dict))  # 获取第一个键
+# Check the array dimension of the first entry
+first_key = next(iter(pro_esm_dict))  # Get the first key
 array_shape = pro_esm_dict[first_key].shape
 print(f"Array shape (pro_esm_dict) for {first_key}: {array_shape}")
 
 
-# 读取第一个文件
+# Read the first file
 with open("../protein_embedding/protein_embeddings_all_esmfold.pkl", "rb") as f:
     pro_esmfold_dict = pickle.load(f)
     
 
-# 检查第一个条目的数组维度
-first_key = next(iter(pro_esmfold_dict))  # 获取第一个键
+# Check the array dimension of the first entry
+first_key = next(iter(pro_esmfold_dict))  # Get the first key
 array_shape = pro_esmfold_dict[first_key].shape
 print(f"Array shape (pro_esmfold_dict) for {first_key}: {array_shape}")
 
-text_embed_data = np.load("../text_embedding/text_embeddings_nonfill.npy")  # 替换为文件路径
+text_embed_data = np.load("../text_embedding/text_embeddings_nonfill.npy")  # Replace with the file path
 print(f"Shape for text embedding: {text_embed_data.shape}")
 
 x_dim = text_embed_data.shape[1]
@@ -427,7 +427,7 @@ pro_esm_dim = next(iter(pro_esm_dict.values())).shape[0]
 pro_esmfold_dim = next(iter(pro_esmfold_dict.values())).shape[0]
 
 
-# --------- 准备测试集与 DataLoader（只构建一次）---------
+# --------- Prepare test set and DataLoader (build once) ---------
 test_in_df  = pd.read_csv("data/basic_plasma_human_high_test.csv", keep_default_na=False, na_values=[''])
 
 test_in_loader = DataLoader(
@@ -435,29 +435,29 @@ test_in_loader = DataLoader(
     batch_size=4096, shuffle=False, num_workers=8
 )
 
-# --------- 逐阶段评估 ---------
+# --------- Evaluate stage by stage ---------
 load_stage = 5
 work_dir = 'output/stage_12345'
 ckpt_path = os.path.join(work_dir, f"saved_model_stage_{load_stage}.pt")
 
 
-# 每个阶段重新加载权重（模型结构一致）
+# Reload weights at each stage (the model structure is the same)
 model = CrossAttentionClassifierGated(x_dim, pro_esm_dim, pro_esmfold_dim).to(device)
 model.load_state_dict(torch.load(ckpt_path, map_location=device))
 print(f"\n--------- Load from stage {load_stage} ---------")
 print(f"Loaded checkpoint: {ckpt_path}")
 
 # %%
-# 1) 收集分数
+# 1) Collect scores
 y_true, y_prob, weights, logits_1d = collect_probs_on_loader(
     model, test_in_loader, device, sample_weighted=True
 )
 
-# 2) 计算 ROC（带权重）
+# 2) Compute weighted ROC
 fpr, tpr, roc_thr = roc_curve(y_true, y_prob, sample_weight=weights)
 roc_auc = roc_auc_score(y_true, y_prob, sample_weight=weights)
 
-# 3) 保存绘图数据（npy：最快、无损）
+# 3) Save plotting data (npy: fast and lossless)
 roc_data = {
     "fpr": fpr,
     "tpr": tpr,
@@ -472,7 +472,7 @@ np.save(roc_npy_path, roc_data)
 print(f"[SAVE] {roc_npy_path}")
 
 # ======================
-# PR 曲线（带权重）
+# PR curve (weighted)
 # ======================
 precision, recall, pr_thr = precision_recall_curve(y_true, y_prob, sample_weight=weights)
 ap = average_precision_score(y_true, y_prob, sample_weight=weights)  # AUPRC / AP
@@ -480,7 +480,7 @@ ap = average_precision_score(y_true, y_prob, sample_weight=weights)  # AUPRC / A
 pr_data = {
     "precision": precision,
     "recall": recall,
-    "thresholds": pr_thr,     # 注意：长度通常比 precision/recall 少 1
+    "thresholds": pr_thr,     # Length is usually one less than precision/recall
     "ap": float(ap),
     "y_true": y_true,
     "y_prob": y_prob,
@@ -492,7 +492,7 @@ np.save(pr_npy_path, pr_data)
 print(f"[SAVE] {pr_npy_path}")
 
 # %%
-# 4) 画 ROC 并保存图
+# 4) Plot ROC and save the figure
 fig, ax = plt.subplots(figsize=(4.2, 4.2))
 ax.plot(fpr, tpr, label=f"AUC={roc_auc:.4f}")
 ax.plot([0, 1], [0, 1], linestyle="--")
@@ -511,12 +511,12 @@ print(f"[SAVE] {roc_png_path}")
 
 # %%
 # ======================
-# 画 PR 并保存图
+# Plot PR and save the figure
 # ======================
 fig, ax = plt.subplots(figsize=(4.2, 4.2))
 ax.plot(recall, precision, label=f"AP={ap:.4f}")
 
-# baseline：正类比例（随机分类器的 precision 水平线）
+# baseline: positive-class proportion (precision level of a random classifier)
 pos_rate = y_true.mean()
 ax.hlines(pos_rate, 0, 1, linestyles="--", linewidth=1, label=f"Baseline={pos_rate:.3f}")
 

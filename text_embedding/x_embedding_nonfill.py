@@ -135,7 +135,7 @@ model_path = "../../pretrained_model/Linq-Embed-Mistral"
 model = SentenceTransformer(model_path)
 
 # %%
-# texts_with_instruct 是一个字符串列表，每个元素是一个结构化 prompt
+# texts_with_instruct is a list of strings, each a structured prompt
 embeddings = model.encode(texts_with_instruct, batch_size=16, show_progress_bar=True, convert_to_numpy=True)
 
 # %%

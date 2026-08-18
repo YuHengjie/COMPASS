@@ -22,10 +22,10 @@ history = np.load("output/fine_tuning/history_ft.npy", allow_pickle=True).item()
 
 print(history.keys())
 
-# 找到 val_aupr 最大的 epoch
+# Find the epoch with the largest val_aupr
 best_idx = np.argmax(history["aupr"])
 
-# 对应的最大 AUPR 和 threshold
+# Corresponding maximum AUPR and threshold
 best_aupr = history["aupr"][best_idx]
 threshold = history["best_thresh"][best_idx]
 
@@ -80,7 +80,7 @@ def evaluate_metrics_by_id(df, threshold=None):
         recall = recall_score(y_true, y_pred, zero_division=0)
         f1 = f1_score(y_true, y_pred, zero_division=0)
 
-        # AUROC/AUPRC 要求 y_true 至少有两个类别
+        # AUROC/AUPRC require at least two classes in y_true
         if len(np.unique(y_true)) > 1:
             auroc = roc_auc_score(y_true, y_prob)
             auprc = average_precision_score(y_true, y_prob)
@@ -220,7 +220,7 @@ df
 
 # %%
 
-# pred_prob 宽表
+# pred_prob wide table
 pred_prob_wide = (
     df.pivot_table(
         index=["ID", "dose"],
@@ -231,7 +231,7 @@ pred_prob_wide = (
     .reset_index()
 )
 
-# 去掉 columns 的名字，使表头更干净
+# Remove column names to clean the header
 pred_prob_wide.columns.name = None
 
 
@@ -254,7 +254,7 @@ pred_prob_wide_T = pred_prob_wide_T.rename(columns={"index": "Accession"})
 pred_prob_wide_T
 
 # %%
-# 去掉 columns 的名字，使表头更干净
+# Remove column names to clean the header
 pred_prob_wide_T.columns.name = None
 pred_prob_wide_T
 
@@ -263,10 +263,10 @@ history = np.load("output/fine_tuning/history_ft.npy", allow_pickle=True).item()
 
 print(history.keys())
 
-# 找到 val_aupr 最大的 epoch
+# Find the epoch with the largest val_aupr
 best_idx = np.argmax(history["aupr"])
 
-# 对应的最大 AUPR 和 threshold
+# Corresponding maximum AUPR and threshold
 best_aupr = history["aupr"][best_idx]
 threshold = history["best_thresh"][best_idx]
 
@@ -275,18 +275,18 @@ print("Best AUPR:", best_aupr)
 print("Best threshold:", threshold)
 
 # %%
-# 找到 NP 开头的列
+# Find columns starting with NP
 np_cols = [col for col in pred_prob_wide_T.columns if col.startswith("NP")]
 
 np_df = pred_prob_wide_T[np_cols]
 
-# 每列均值
+# Mean of each column
 np_mean = np_df.mean()
 
-# 每列 > threshold 的比例
+# Proportion of values above threshold in each column
 np_gt_ratio = np_df.gt(threshold).mean()
 
-# 每列 > threshold 的值的均值
+# Mean of values above threshold in each column
 np_gt_mean = np_df.where(np_df.gt(threshold)).mean()
 
 # Pielou evenness
@@ -301,10 +301,10 @@ def pielou_evenness(x):
     shannon = -(p * np.log(p)).sum()
     return shannon / np.log(len(x))
 
-# 对每个 NP 列计算 Pielou evenness
+# Compute Pielou evenness for each NP column
 np_pielou = np_df.where(np_df.gt(threshold)).apply(pielou_evenness, axis=0)
 
-# 汇总
+# Summary
 np_summary = pd.DataFrame({
     "mean": np_mean,
     "gt_threshold_ratio": np_gt_ratio,
@@ -312,7 +312,7 @@ np_summary = pd.DataFrame({
     #"pielou_evenness": np_pielou,
 })
 
-# 按 mean 从大到小排序
+# Sort by mean in descending order
 np_summary = np_summary.sort_values("mean", ascending=False)
 
 print(np_summary)

@@ -8,7 +8,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
-# 字体
+# Font
 font_path = "/home/yuhengjie/.fonts/ArialMdm.ttf"
 prop = fm.FontProperties(fname=font_path)
 
@@ -36,8 +36,8 @@ df_pred = df_pred.sort_values(by='gt_threshold_ratio', ascending=False).reset_in
 df_pred
 
 # %%
-# 先给 sample 列生成排序编号
-# 当前顺序
+# First generate sorted numbering for the sample column
+# Current order
 sample_raw = df_raw['sample'].tolist()
 sample_pred = df_pred['sample'].tolist()
 print("df_raw 中的 sample 顺序:")
@@ -46,11 +46,11 @@ print("\ndf_pred 中的 sample 顺序:")
 print(sample_pred)
 
 # %%
-# 生成 rank 映射（从1开始）
+# Generate rank mapping (starting from 1)
 raw_rank = {s: i+1 for i, s in enumerate(df_raw['sample'])}
 pred_rank = {s: i+1 for i, s in enumerate(df_pred['sample'])}
 
-# 新建比较表
+# Create the comparison table
 rank_df = pd.DataFrame({
     'sample': sorted(raw_rank.keys())
 })
@@ -112,14 +112,14 @@ high_low_samples = rank_df[
 high_low_samples[['sample', 'raw_group', 'pred_group']]
 
 # %%
-# 将 df_raw 中 coverage 对应的值合并进来
+# Merge coverage values from df_raw
 rank_df = rank_df.merge(
     df_raw[['sample', 'coverage']],
     on='sample',
     how='left'
 )
 
-# 将 df_pred 中 gt_threshold_ratio 对应的值合并进来
+# Merge gt_threshold_ratio values from df_pred
 rank_df = rank_df.merge(
     df_pred[['sample', 'gt_threshold_ratio']],
     on='sample',
@@ -163,7 +163,7 @@ print(f"Recall@{K}: {recall_at_k:.2%}")
 print("Hit samples:", overlap)
 
 # %%
-# 画热图
+# Plot heatmap
 fig, ax =  plt.subplots(figsize=(4, 3))
 hm = sns.heatmap(
     agreement_table,
@@ -195,11 +195,11 @@ for label in ax.get_xticklabels():
 for label in ax.get_yticklabels():
     label.set_fontproperties(prop)
 
-# heatmap数字
+# heatmap numbers
 for text in ax.texts:
     text.set_fontproperties(prop)
 
-# colorbar字体
+# colorbar font
 cbar = hm.collections[0].colorbar
 for label in cbar.ax.get_yticklabels():
     label.set_fontproperties(prop)
@@ -214,7 +214,7 @@ plt.savefig(
 plt.show()
 
 # %%
-# %% 方案一：Agreement Heatmap (修复字体与样式)
+# %% Option 1: Agreement Heatmap (fix fonts and style)
 fig, ax = plt.subplots(figsize=(4.5, 3.5))
 hm = sns.heatmap(
     agreement_table,
@@ -229,7 +229,7 @@ hm = sns.heatmap(
 ax.set_xlabel("Predicted rank", fontproperties=prop, fontsize=11)
 ax.set_ylabel("Experimental rank", fontproperties=prop, fontsize=11)
 
-# 统一设置 tick 字体
+# Set tick fonts consistently
 for label in ax.get_xticklabels() + ax.get_yticklabels():
     label.set_fontproperties(prop)
 
@@ -246,19 +246,19 @@ plt.show()
 from matplotlib.lines import Line2D
 df_plot = rank_df.copy()
 
-# 按 predicted rank 排序
+# Sort by predicted rank
 df_plot = df_plot.sort_values(
     by='pred_rank'
 ).reset_index(drop=True)
 
 
-# rank转换为高度
+# convert rank to height
 max_rank = max(
     df_plot['raw_rank'].max(),
     df_plot['pred_rank'].max()
 )
 
-# rank越小，高度越大
+# smaller rank corresponds to greater height
 df_plot['raw_height'] = (
     max_rank - df_plot['raw_rank'] + 1
 )
@@ -272,7 +272,7 @@ x_pos = np.arange(len(df_plot))
 
 
 # =========================
-# 根据 rank 分组颜色
+# Group colors by rank
 # =========================
 
 rank_colors = {
@@ -295,14 +295,14 @@ def rank_to_color(rank):
 
 
 
-# raw rank对应颜色
+# color by raw rank
 raw_colors = [
     rank_to_color(r)
     for r in df_plot['raw_rank']
 ]
 
 
-# predicted rank对应颜色
+# color by predicted rank
 pred_colors = [
     rank_to_color(r)
     for r in df_plot['pred_rank']
@@ -311,7 +311,7 @@ pred_colors = [
 
 
 # =========================
-# 绘图
+# Plot
 # =========================
 
 fig, ax = plt.subplots(
@@ -337,7 +337,7 @@ ax.vlines(
 
 
 # point
-# 外圈：彩色描边
+# Outer circle: colored edge
 ax.scatter(
     x_pos - 0.18,
     df_plot['pred_height'],
@@ -349,7 +349,7 @@ ax.scatter(
     zorder=3
 )
 
-# 中圈：白色隔离背景
+# Inner circle: white isolation background
 ax.scatter(
     x_pos - 0.18,
     df_plot['pred_height'],
@@ -360,7 +360,7 @@ ax.scatter(
     zorder=4
 )
 
-# 内点：彩色实心
+# Inner point: solid colored
 ax.scatter(
     x_pos - 0.18,
     df_plot['pred_height'],
@@ -389,7 +389,7 @@ ax.vlines(
 
 
 # point
-# 外圈：彩色描边
+# Outer circle: colored edge
 ax.scatter(
     x_pos + 0.18,
     df_plot['raw_height'],
@@ -401,7 +401,7 @@ ax.scatter(
     zorder=3
 )
 
-# 中圈：白色隔离背景
+# Inner circle: white isolation background
 ax.scatter(
     x_pos + 0.18,
     df_plot['raw_height'],
@@ -412,7 +412,7 @@ ax.scatter(
     zorder=4
 )
 
-# 内点：彩色实心
+# Inner point: solid colored
 ax.scatter(
     x_pos + 0.18,
     df_plot['raw_height'],
@@ -423,7 +423,7 @@ ax.scatter(
 )
 
 # =========================
-# 坐标轴
+# Axes
 # =========================
 
 
@@ -440,12 +440,12 @@ ax.set_xticklabels(
 
 
 # =========================
-# y轴只显示 0, 12, 24, 36
+# y-axis shows only 0, 12, 24, 36
 # =========================
 
 rank_ticks = [0, 12, 24, 36]
 
-# 转换到柱高坐标
+# Convert to bar-height coordinates
 ax.set_yticks(
     max_rank - np.array(rank_ticks) + 1
 )
@@ -470,7 +470,7 @@ ax.set_ylabel(
 
 
 # =========================
-# 美化
+# Styling
 # =========================
 
 ax.spines['top'].set_visible(False)
@@ -607,10 +607,10 @@ plt.savefig(
 
 plt.show()
 
-# %% 方案二：Rank-Order Scatter (彻底修复 FixedFormatter 警告)
+# %% Option 2: Rank-Order Scatter (fully fix FixedFormatter warning)
 fig, ax = plt.subplots(figsize=(5, 5))
 
-# 1. 绘制散点
+# 1. Draw scatter points
 ax.scatter(
     rank_df['raw_rank'], 
     rank_df['pred_rank'], 
@@ -618,24 +618,24 @@ ax.scatter(
     color='#4C72B0', edgecolors='white', linewidth=0.5
 )
 
-# 2. 对角线
+# 2. Diagonal
 max_rank = len(rank_df) + 1
 ax.plot([0, max_rank], [0, max_rank], 'k--', alpha=0.5, lw=1.5)
 
-# 3. 标注 Spearman
+# 3. Annotate Spearman
 corr, p_value = spearmanr(rank_df['raw_rank'], rank_df['pred_rank'])
 textstr = f'Spearman $\\rho = {corr:.3f}$\n$p = {p_value:.2g}$'
 props_box = dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='none')
 ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=10,
         verticalalignment='top', bbox=props_box, fontproperties=prop)
 
-# 4. 坐标轴与字体安全设置
+# 4. Safe axis and font settings
 ax.set_xlabel("Experimental Rank", fontproperties=prop, fontsize=12)
 ax.set_ylabel("Predicted Rank", fontproperties=prop, fontsize=12)
 ax.set_xlim(0, max_rank)
 ax.set_ylim(0, max_rank)
 
-# 避免 set_xticklabels 的 Warning
+# Avoid the set_xticklabels warning
 for label in ax.get_xticklabels() + ax.get_yticklabels():
     label.set_fontproperties(prop)
     label.set_fontsize(10)
@@ -647,10 +647,10 @@ plt.show()
 
 
 
-# %% 方案三：Bland-Altman Plot (带标准化的安全绘制)
+# %% Option 3: Bland-Altman Plot (safe plotting with normalization)
 fig, ax = plt.subplots(figsize=(6, 4.5))
 
-# 注意：如果数值量纲不一致，建议解除下面两行的注释进行 Z-Score 标准化
+# If the numeric scales differ, uncomment the two lines below for Z-score normalization
 # exp_val = (rank_df['coverage'] - rank_df['coverage'].mean()) / rank_df['coverage'].std()
 # pred_val = (rank_df['gt_threshold_mean'] - rank_df['gt_threshold_mean'].mean()) / rank_df['gt_threshold_mean'].std()
 
@@ -683,7 +683,7 @@ plt.savefig("output/nature_bland_altman.png", dpi=600, bbox_inches="tight")
 plt.show()
 
 
-# %% 方案四：Top-K Cumulative Hit Rate (修复对齐与 Formatting)
+# %% Option 4: Top-K Cumulative Hit Rate (fix alignment and formatting)
 fig, ax = plt.subplots(figsize=(6, 4.5))
 
 K_max = len(rank_df)
@@ -693,10 +693,10 @@ for k in range(1, K_max + 1):
     true_top_k = set(rank_df.sort_values('raw_rank').head(k)['sample'])
     hits.append(len(pred_top_k & true_top_k) / k)
 
-# 1. 绘制模型阶梯图（where='post' 保证 K=1 时落在 x=1 上）
+# 1. Draw the model step plot (where='post' keeps K=1 at x=1)
 ax.step(range(1, K_max + 1), hits, where='post', color='#4C72B0', lw=2, label='Model')
 
-# 2. 随机基线
+# 2. Random baseline
 random_baseline = [k / K_max for k in range(1, K_max + 1)]
 ax.plot(range(1, K_max + 1), random_baseline, 'k--', alpha=0.4, lw=1, label='Random Baseline')
 
@@ -705,7 +705,7 @@ ax.set_ylabel("Cumulative hit rate (Precision@K)", fontproperties=prop, fontsize
 ax.set_xlim(1, K_max)
 ax.set_ylim(0, 1.05)
 
-# 安全设置 Tick 字体，不使用手写的 set_yticklabels 格式化，防止错位
+# Set tick fonts safely; avoid manual set_yticklabels formatting to prevent misalignment
 for label in ax.get_xticklabels() + ax.get_yticklabels():
     label.set_fontproperties(prop)
     label.set_fontsize(10)
