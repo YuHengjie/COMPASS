@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 
 # Font
-font_path = "/home/yuhengjie/.fonts/ArialMdm.ttf"
+font_path = "/path/to/your/fonts/ArialMdm.ttf"
 prop = fm.FontProperties(fname=font_path)
 
 plt.rcParams["font.family"] = prop.get_name()

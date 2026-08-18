@@ -4,7 +4,7 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib import font_manager as fm
-font_path = "/home/yuhengjie/.fonts/ArialMdm.ttf"
+font_path = "/path/to/your/fonts/ArialMdm.ttf"
 prop = fm.FontProperties(fname=font_path)
 
 # %%

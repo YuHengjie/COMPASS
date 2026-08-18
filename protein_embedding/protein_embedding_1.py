@@ -14,7 +14,7 @@ df
 
 # %% Load tokenizer and model
 # Base model (ESM2): download from Hugging Face or ModelScope into the folder below, then update this hard-coded path.
-model_path = "/yuhengjie/backup/pretrainedmodel/esm2_t36_3B_UR50D"
+model_path = "/path/to/your/pretrained_model/esm2_t36_3B_UR50D"
 
 # Load tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(model_path)
