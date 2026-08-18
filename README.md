@@ -39,6 +39,11 @@ COMPASS/
 ├── text_embedding_4_explain/
 ├── model_explain/
 ├── finetuning/
+├── adaption_screen/
+│   ├── data/
+│   ├── ft/
+│   │   └── data/
+│   └── pred/
 ├── run_test.sh
 └── run_roc_pr.sh
 ```
@@ -114,6 +119,15 @@ Contains adaptation experiments for unseen materials and proteins.
 
 For each target domain, the scripts split independent test and validation sets, train models with increasing fractions of the remaining target-domain data, and compare training from scratch with COMPASS adaptation, in which the pretrained representation and fusion modules are retained and only the prediction head is optimized.
 
+### `adaption_screen/`
+
+Contains code for adapting COMPASS to laboratory-specific calibration data and for virtual screening of plasma nano-enrichment schemes.
+
+- `data/`: shared input data such as protein sequence embeddings, protein structural embeddings, experimental-context embeddings, and the quality-controlled dataset. See its README for the required files.
+- `ft/`: fine-tuning/adaptation pipeline (`t1_unseen_ft.py` through `t6_compare_pred_exp.py`) for adapting the pretrained model and comparing predictions with experimental measurements.
+  - `ft/data/`: stores `train.csv`, `val.csv`, and `test.csv`. `train` and `val` are derived from calibrated experimental data with an 8:2 split; `test` contains candidate nano-enrichment schemes.
+- `pred/`: direct prediction with the original/pretrained model (`t1_test.py`).
+
 ### `run_test.sh` and `run_roc_pr.sh`
 
 Top-level batch scripts that iterate over selected experiment folders and run the evaluation scripts:
@@ -133,4 +147,8 @@ Top-level batch scripts that iterate over selected experiment folders and run th
 
 ## Citation
 
-Formal citation information will be added after publication.
+If you use this work, please cite the arXiv preprint:
+
+[https://arxiv.org/abs/2507.14245](https://arxiv.org/abs/2507.14245)
+
+Formal citation information will be updated after publication.
